@@ -1,0 +1,62 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'ru.pashaapps'
+version = providers.gradleProperty('version').orElse('1.0.0').get()
+
+ext {
+    javaVersion = 21
+    javafxVersion = '21.0.8'
+    jacksonVersion = '2.18.4'
+    slf4jVersion = '2.0.17'
+    logbackVersion = '1.5.18'
+    junitVersion = '5.12.2'
+}
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(javaVersion)
+    }
+}
+
+application {
+    mainClass = 'ru.pashaapps.appfleet.AppFleetApplication'
+}
+
+dependencies {
+    implementation "org.openjfx:javafx-base:${javafxVersion}:win"
+    implementation "org.openjfx:javafx-controls:${javafxVersion}:win"
+    implementation "org.openjfx:javafx-graphics:${javafxVersion}:win"
+    implementation "com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}"
+    implementation "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:${jacksonVersion}"
+    implementation "org.slf4j:slf4j-api:${slf4jVersion}"
+    runtimeOnly "ch.qos.logback:logback-classic:${logbackVersion}"
+
+    testImplementation "org.junit.jupiter:junit-jupiter:${junitVersion}"
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 21
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+    testLogging {
+        events 'failed', 'skipped'
+        exceptionFormat 'full'
+    }
+}
+
+tasks.named('jar') {
+    manifest {
+        attributes('Main-Class': application.mainClass.get(), 'Implementation-Version': project.version)
+    }
+}
