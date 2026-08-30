@@ -38,6 +38,8 @@ OutputDir={#OutputDir}
 OutputBaseFilename={#TechnicalName}-Setup-{#AppVersion}-x64
 DisableProgramGroupPage=yes
 WizardStyle=modern
+SetupIconFile=..\assets\AppFleet.ico
+UninstallDisplayIcon={app}\{#MainExecutable}
 
 [Tasks]
 Name: "desktopicon"; Description: "Создать ярлык на рабочем столе"; GroupDescription: "Ярлыки:"; Flags: unchecked

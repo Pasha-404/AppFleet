@@ -53,6 +53,16 @@ Live-проверка использует реальный публичный �
 
 Версия определена одним Gradle property и переносится в JAR, app-image, Inno Setup, Registry и manifest. Значение `appfleetRepositoryUrl` обязательно нужно передать с фактическим опубликованным репозиторием AppFleet: по нему приложение ищет собственные обновления.
 
+### Иконка
+
+Исходник иконки — [assets/AppFleet.svg](assets/AppFleet.svg), а многоразмерный Windows ICO — [assets/AppFleet.ico](assets/AppFleet.ico). После изменения дизайна выполните:
+
+```powershell
+.\scripts\generate-icon.ps1
+```
+
+Скрипт создаёт размеры 16, 24, 32, 48, 64, 128 и 256 px. Сборка использует ICO для app-image и Inno Setup.
+
 При наличии сертификата подпись добавляется до вычисления SHA-256:
 
 ```powershell

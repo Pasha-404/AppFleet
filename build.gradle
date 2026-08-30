@@ -110,6 +110,7 @@ def installerDirectory = layout.buildDirectory.dir('installer')
 def releaseDirectory = layout.projectDirectory.dir("dist/release/${project.version}")
 def installerName = "AppFleet-Setup-${project.version}-x64.exe"
 def releaseManifestName = 'appfleet-manifest.json'
+def applicationIcon = layout.projectDirectory.file('assets/AppFleet.ico')
 
 tasks.register('verifyVersion') {
     group = 'verification'
@@ -174,6 +175,7 @@ tasks.register('createAppImage') {
     dependsOn 'verifyVersion', 'createRuntime', 'prepareJpackageInput'
     inputs.dir(jpackageInputDirectory)
     inputs.dir(runtimeDirectory)
+    inputs.file(applicationIcon)
     inputs.property('appVersion', providers.provider { project.version.toString() })
     outputs.dir(appImageDirectory)
     doLast {
@@ -186,6 +188,7 @@ tasks.register('createAppImage') {
                     '--input', jpackageInputDirectory.get().asFile.absolutePath,
                     '--main-jar', tasks.named('jar').get().archiveFileName.get(),
                     '--main-class', application.mainClass.get(), '--runtime-image', runtimeDirectory.get().asFile.absolutePath,
+                    '--icon', applicationIcon.asFile.absolutePath,
                     '--java-options', '--add-modules=javafx.controls,javafx.graphics,javafx.base', '--java-options', '-Dfile.encoding=UTF-8'
         }
     }
@@ -196,6 +199,7 @@ tasks.register('compileInnoSetup') {
     dependsOn 'verifyVersion', 'createAppImage'
     inputs.dir(appImageDirectory)
     inputs.file('installer/AppFleet.iss')
+    inputs.file(applicationIcon)
     inputs.property('appVersion', providers.provider { project.version.toString() })
     inputs.property('appId', appfleetAppId)
     inputs.property('repositoryUrl', appfleetRepositoryUrl)
