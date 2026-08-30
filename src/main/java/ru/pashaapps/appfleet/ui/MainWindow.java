@@ -90,8 +90,14 @@ public final class MainWindow {
         Label heading = new Label("Приложения"); heading.getStyleClass().add("page-heading");
         Button check = new Button("Проверить"); check.setOnAction(event -> refreshApplications());
         Button add = new Button("Добавить репозиторий"); add.getStyleClass().add("primary"); add.setOnAction(event -> addRepository());
-        Region spacer = new Region(); HBox.setHgrow(spacer, Priority.ALWAYS);
-        HBox commands = new HBox(12, heading, statusLine, spacer, check, add); commands.setAlignment(Pos.CENTER_LEFT); commands.setPadding(new Insets(20, 24, 12, 24)); commands.getStyleClass().add("command-bar");
+        HBox actions = new HBox(12, check, add);
+        actions.setAlignment(Pos.CENTER_RIGHT);
+        actions.setMinWidth(Region.USE_PREF_SIZE);
+        statusLine.setMinWidth(0);
+        statusLine.setMaxWidth(Double.MAX_VALUE);
+        statusLine.setTextOverrun(OverrunStyle.ELLIPSIS);
+        HBox.setHgrow(statusLine, Priority.ALWAYS);
+        HBox commands = new HBox(12, heading, statusLine, actions); commands.setAlignment(Pos.CENTER_LEFT); commands.setMinWidth(0); commands.setPadding(new Insets(20, 24, 12, 24)); commands.getStyleClass().add("command-bar");
         configureApplicationsTable();
         VBox page = new VBox(commands, applicationsTable); VBox.setVgrow(applicationsTable, Priority.ALWAYS); page.getStyleClass().add("content-page");
         return page;
@@ -108,7 +114,7 @@ public final class MainWindow {
                 textColumn("Размер", 105, item -> item.selectedAsset() == null ? "—" : humanSize(item.selectedAsset().size())),
                 actionColumn(), menuColumn()));
         applicationsTable.setPlaceholder(new Label("Добавьте публичный GitHub-репозиторий, чтобы начать."));
-        applicationsTable.setMinWidth(1180);
+        applicationsTable.setMinWidth(0);
     }
     private TableColumn<ApplicationSnapshot, String> textColumn(String title, double width, Function<ApplicationSnapshot, String> value) {
         TableColumn<ApplicationSnapshot, String> column = new TableColumn<>(title); column.setPrefWidth(width); column.setMinWidth(width);

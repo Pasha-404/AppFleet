@@ -146,6 +146,8 @@ tasks.register('extractJavafxJmods', Sync) {
 tasks.register('createRuntime') {
     group = 'distribution'
     dependsOn 'verifyVersion', 'extractJavafxJmods'
+    inputs.dir(javafxJmodsDirectory)
+    inputs.property('modules', 'javafx.controls,javafx.graphics,javafx.base,java.net.http,java.logging,java.naming,java.desktop,jdk.crypto.ec')
     outputs.dir(runtimeDirectory)
     doLast {
         delete(runtimeDirectory)
@@ -170,6 +172,9 @@ tasks.register('prepareJpackageInput', Sync) {
 tasks.register('createAppImage') {
     group = 'distribution'
     dependsOn 'verifyVersion', 'createRuntime', 'prepareJpackageInput'
+    inputs.dir(jpackageInputDirectory)
+    inputs.dir(runtimeDirectory)
+    inputs.property('appVersion', providers.provider { project.version.toString() })
     outputs.dir(appImageDirectory)
     doLast {
         delete(appImageDirectory)
@@ -189,6 +194,11 @@ tasks.register('createAppImage') {
 tasks.register('compileInnoSetup') {
     group = 'distribution'
     dependsOn 'verifyVersion', 'createAppImage'
+    inputs.dir(appImageDirectory)
+    inputs.file('installer/AppFleet.iss')
+    inputs.property('appVersion', providers.provider { project.version.toString() })
+    inputs.property('appId', appfleetAppId)
+    inputs.property('repositoryUrl', appfleetRepositoryUrl)
     outputs.file(installerDirectory.map { it.file(installerName) })
     doLast {
         delete(installerDirectory)
@@ -219,6 +229,10 @@ tasks.register('signWindowsInstaller') {
 tasks.register('generateReleaseFiles') {
     group = 'distribution'
     dependsOn 'verifyVersion', 'signWindowsInstaller'
+    inputs.file(installerDirectory.map { it.file(installerName) })
+    inputs.property('appVersion', providers.provider { project.version.toString() })
+    inputs.property('appId', appfleetAppId)
+    inputs.property('repositoryUrl', appfleetRepositoryUrl)
     outputs.dir(releaseDirectory)
     doLast {
         def output = releaseDirectory.asFile
