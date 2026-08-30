@@ -98,7 +98,7 @@ public final class MainWindow {
     }
     private void configureApplicationsTable() {
         applicationsTable.setColumnResizePolicy(TableView.UNCONSTRAINED_RESIZE_POLICY);
-        applicationsTable.getColumns().setAll(
+        applicationsTable.getColumns().setAll(List.of(
                 textColumn("Приложение", 235, item -> item.displayName() + "\n" + item.repository().slug()),
                 textColumn("Состояние", 185, item -> item.status().display()),
                 textColumn("Установленная версия", 145, item -> emptyToDash(item.installedVersion())),
@@ -106,7 +106,7 @@ public final class MainWindow {
                 textColumn("Дата релиза", 145, item -> item.release() == null ? "—" : DATE_TIME.format(item.release().publishedAt())),
                 textColumn("Файл", 245, ApplicationSnapshot::assetName),
                 textColumn("Размер", 105, item -> item.selectedAsset() == null ? "—" : humanSize(item.selectedAsset().size())),
-                actionColumn(), menuColumn());
+                actionColumn(), menuColumn()));
         applicationsTable.setPlaceholder(new Label("Добавьте публичный GitHub-репозиторий, чтобы начать."));
         applicationsTable.setMinWidth(1180);
     }
@@ -140,7 +140,7 @@ public final class MainWindow {
         Region spacer = new Region(); HBox.setHgrow(spacer, Priority.ALWAYS);
         HBox commands = new HBox(12, heading, spacer, refresh); commands.setAlignment(Pos.CENTER_LEFT); commands.setPadding(new Insets(20, 24, 12, 24)); commands.getStyleClass().add("command-bar");
         journalTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
-        journalTable.getColumns().setAll(journalColumn("Дата и время", 155, entry -> DATE_TIME.format(entry.occurredAt())), journalColumn("Приложение", 170, OperationEntry::repository), journalColumn("Операция", 180, OperationEntry::operation), journalColumn("Результат", 125, OperationEntry::result), journalColumn("Описание", 390, OperationEntry::message));
+        journalTable.getColumns().setAll(List.of(journalColumn("Дата и время", 155, entry -> DATE_TIME.format(entry.occurredAt())), journalColumn("Приложение", 170, OperationEntry::repository), journalColumn("Операция", 180, OperationEntry::operation), journalColumn("Результат", 125, OperationEntry::result), journalColumn("Описание", 390, OperationEntry::message)));
         journalTable.setRowFactory(ignored -> { TableRow<OperationEntry> row = new TableRow<>(); row.setOnMouseClicked(event -> { if (event.getClickCount() == 2 && !row.isEmpty()) showTechnicalDetails(row.getItem()); }); return row; });
         VBox page = new VBox(commands, journalTable); VBox.setVgrow(journalTable, Priority.ALWAYS); page.getStyleClass().add("content-page"); return page;
     }

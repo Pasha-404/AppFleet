@@ -3,6 +3,10 @@ plugins {
     id 'application'
 }
 
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+import java.security.MessageDigest
+
 group = 'ru.pashaapps'
 version = providers.gradleProperty('version').orElse('1.0.0').get()
 def appfleetRepositoryUrl = providers.gradleProperty('appfleetRepositoryUrl').orElse('https://github.com/Pasha-404/AppFleet')
@@ -19,6 +23,9 @@ ext {
 
 repositories {
     mavenCentral()
+}
+
+configurations {
 }
 
 java {
@@ -47,6 +54,7 @@ dependencies {
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     options.release = 21
+    options.compilerArgs.add('-Xlint:unchecked')
 }
 
 tasks.withType(Test).configureEach {
@@ -89,4 +97,163 @@ tasks.named('run', JavaExec) {
         jvmArgs '--module-path', javafxJars.collect { it.absolutePath }.join(File.pathSeparator), '--add-modules', 'javafx.controls,javafx.graphics,javafx.base'
         classpath = sourceSets.main.runtimeClasspath.minus(files(javafxJars))
     }
+}
+
+def runtimeDirectory = layout.buildDirectory.dir('runtime')
+def javafxJmodsDirectory = layout.buildDirectory.dir('javafx-jmods')
+def javafxJmodsArchive = layout.projectDirectory.file("tools/cache/openjfx-${javafxVersion}-windows-x64-jmods.zip")
+def javafxJmodsUrl = "https://download2.gluonhq.com/openjfx/${javafxVersion}/openjfx-${javafxVersion}_windows-x64_bin-jmods.zip"
+def javafxJmodsSha256 = 'a19e964c14ad011d58726f00d8c810ba3d9da5dc369ea3e1b2f71e617302da0e'
+def jpackageInputDirectory = layout.buildDirectory.dir('jpackage-input')
+def appImageDirectory = layout.buildDirectory.dir('app-image')
+def installerDirectory = layout.buildDirectory.dir('installer')
+def releaseDirectory = layout.projectDirectory.dir("dist/release/${project.version}")
+def installerName = "AppFleet-Setup-${project.version}-x64.exe"
+def releaseManifestName = 'appfleet-manifest.json'
+
+tasks.register('verifyVersion') {
+    group = 'verification'
+    doLast {
+        if (!(project.version as String).matches(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/)) {
+            throw new GradleException("version must be SemVer, got: ${project.version}")
+        }
+        UUID.fromString(appfleetAppId.get())
+    }
+}
+
+tasks.register('downloadJavafxJmods') {
+    doLast {
+        def archive = javafxJmodsArchive.asFile
+        archive.parentFile.mkdirs()
+        def receivedHash = archive.isFile() ? MessageDigest.getInstance('SHA-256').digest(archive.bytes).encodeHex().toString() : ''
+        logger.lifecycle("JavaFX JMOD archive SHA-256: ${receivedHash ?: 'not downloaded'}")
+        if (receivedHash != javafxJmodsSha256) {
+            new URL(javafxJmodsUrl).withInputStream { source -> archive.withOutputStream { output -> source.transferTo(output) } }
+        }
+        if (MessageDigest.getInstance('SHA-256').digest(archive.bytes).encodeHex().toString() != javafxJmodsSha256) throw new GradleException('Downloaded JavaFX JMOD archive failed SHA-256 verification')
+    }
+}
+
+tasks.register('extractJavafxJmods', Sync) {
+    dependsOn 'downloadJavafxJmods'
+    from { zipTree(javafxJmodsArchive.asFile) }
+    include '**/*.jmod'
+    includeEmptyDirs = false
+    eachFile { details -> details.path = details.name }
+    into javafxJmodsDirectory
+}
+
+tasks.register('createRuntime') {
+    group = 'distribution'
+    dependsOn 'verifyVersion', 'extractJavafxJmods'
+    outputs.dir(runtimeDirectory)
+    doLast {
+        delete(runtimeDirectory)
+        def javaHome = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }.get().metadata.installationPath.asFile
+        exec {
+            commandLine new File(javaHome, 'bin/jlink.exe').absolutePath,
+                    '--module-path', new File(javaHome, 'jmods').absolutePath + File.pathSeparator + javafxJmodsDirectory.get().asFile.absolutePath,
+                    '--add-modules', 'javafx.controls,javafx.graphics,javafx.base,java.net.http,java.logging,java.naming,java.desktop,jdk.crypto.ec',
+                    '--strip-debug', '--no-header-files', '--no-man-pages', '--compress=zip-6',
+                    '--output', runtimeDirectory.get().asFile.absolutePath
+        }
+    }
+}
+
+tasks.register('prepareJpackageInput', Sync) {
+    dependsOn tasks.named('jar')
+    from(tasks.named('jar'))
+    from(configurations.runtimeClasspath) { exclude 'javafx-*.jar' }
+    into jpackageInputDirectory
+}
+
+tasks.register('createAppImage') {
+    group = 'distribution'
+    dependsOn 'verifyVersion', 'createRuntime', 'prepareJpackageInput'
+    outputs.dir(appImageDirectory)
+    doLast {
+        delete(appImageDirectory)
+        def javaHome = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }.get().metadata.installationPath.asFile
+        exec {
+            commandLine new File(javaHome, 'bin/jpackage.exe').absolutePath,
+                    '--type', 'app-image', '--dest', appImageDirectory.get().asFile.absolutePath,
+                    '--name', 'AppFleet', '--app-version', project.version.toString(), '--vendor', 'PashaApps', '--description', 'GitHub Releases application manager',
+                    '--input', jpackageInputDirectory.get().asFile.absolutePath,
+                    '--main-jar', tasks.named('jar').get().archiveFileName.get(),
+                    '--main-class', application.mainClass.get(), '--runtime-image', runtimeDirectory.get().asFile.absolutePath,
+                    '--java-options', '--add-modules=javafx.controls,javafx.graphics,javafx.base', '--java-options', '-Dfile.encoding=UTF-8'
+        }
+    }
+}
+
+tasks.register('compileInnoSetup') {
+    group = 'distribution'
+    dependsOn 'verifyVersion', 'createAppImage'
+    outputs.file(installerDirectory.map { it.file(installerName) })
+    doLast {
+        delete(installerDirectory)
+        file(installerDirectory).mkdirs()
+        exec {
+            commandLine 'ISCC.exe', "/DAppVersion=${project.version}", "/DAppId=${appfleetAppId.get()}", "/DRepositoryUrl=${appfleetRepositoryUrl.get()}",
+                    "/DAppImageDir=${appImageDirectory.get().file('AppFleet').asFile.absolutePath}", "/DOutputDir=${installerDirectory.get().asFile.absolutePath}", 'installer/AppFleet.iss'
+        }
+        if (!installerDirectory.get().file(installerName).asFile.isFile()) throw new GradleException("Inno Setup did not produce ${installerName}")
+    }
+}
+
+tasks.register('signWindowsInstaller') {
+    group = 'distribution'
+    dependsOn 'compileInnoSetup'
+    doLast {
+        def thumbprint = providers.gradleProperty('signCertificateThumbprint').orNull
+        if (thumbprint == null || thumbprint.isBlank()) {
+            logger.lifecycle('Authenticode signing skipped: no signCertificateThumbprint was supplied.')
+            return
+        }
+        exec {
+            commandLine 'signtool.exe', 'sign', '/sha1', thumbprint, '/fd', 'sha256', '/tr', providers.gradleProperty('timestampUrl').orElse('http://timestamp.digicert.com').get(), '/td', 'sha256', installerDirectory.get().file(installerName).asFile.absolutePath
+        }
+    }
+}
+
+tasks.register('generateReleaseFiles') {
+    group = 'distribution'
+    dependsOn 'verifyVersion', 'signWindowsInstaller'
+    outputs.dir(releaseDirectory)
+    doLast {
+        def output = releaseDirectory.asFile
+        delete(output); output.mkdirs()
+        def installer = installerDirectory.get().file(installerName).asFile
+        copy { from installer; into output }
+        byte[] hash = MessageDigest.getInstance('SHA-256').digest(installer.bytes)
+        def hashText = hash.encodeHex().toString()
+        file("${output}/${installerName}.sha256").setText("${hashText}  ${installerName}\n", 'UTF-8')
+        def manifest = [
+                schemaVersion: 1, appId: appfleetAppId.get(), name: 'AppFleet', technicalName: 'AppFleet', version: project.version.toString(),
+                repositoryUrl: appfleetRepositoryUrl.get(), platform: 'windows', architecture: 'x64',
+                installer: [type: 'inno', assetName: installerName, sha256AssetName: "${installerName}.sha256", silentArgs: ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CLOSEAPPLICATIONS']],
+                detection: [registryKey: "HKCU\\Software\\PashaApps\\${appfleetAppId.get()}", versionValue: 'Version', executableValue: 'Executable'],
+                processNames: ['AppFleet.exe'], minimumAppFleetVersion: project.version.toString()
+        ]
+        file("${output}/${releaseManifestName}").setText(JsonOutput.prettyPrint(JsonOutput.toJson(manifest)) + '\n', 'UTF-8')
+    }
+}
+
+tasks.register('verifyReleaseMetadata') {
+    group = 'verification'
+    dependsOn 'generateReleaseFiles'
+    doLast {
+        def output = releaseDirectory.asFile
+        def installer = file("${output}/${installerName}")
+        def checksum = file("${output}/${installerName}.sha256")
+        def manifest = new JsonSlurper().parse(file("${output}/${releaseManifestName}"))
+        if (!installer.isFile() || !checksum.isFile() || !checksum.text.matches(/(?s)^[a-f0-9]{64}  \Q${installerName}\E\s*$/)) throw new GradleException('Invalid installer or SHA-256 release asset')
+        if (manifest.version != project.version.toString() || manifest.appId != appfleetAppId.get() || manifest.installer.assetName != installerName || manifest.installer.sha256AssetName != "${installerName}.sha256") throw new GradleException('Release manifest does not match generated installer')
+    }
+}
+
+tasks.register('buildWindowsInstaller') {
+    group = 'distribution'
+    description = 'Builds the Inno Setup release directory, including EXE, SHA-256 and appfleet manifest.'
+    dependsOn 'test', 'verifyReleaseMetadata'
 }

@@ -31,3 +31,20 @@
 **Осталось:** сборка jlink/jpackage app-image, Inno Setup installer со стандартной регистрацией HKCU, генерирование release-manifest/SHA-256, GitHub Actions и завершение README/проверок поставки.
 
 **Проверки:** `./gradlew.bat test liveIntegrationTest` успешно; `./gradlew.bat run` успешно запустила JavaFX-приложение с настоящим module-path, выполнила self-update-проверку перед проверкой списка и была затем остановлена как тестовый процесс; `git diff --check` без замечаний.
+
+## Этап 5 — Windows-поставка и выпуск
+
+**Реализовано:** Gradle-конвейер `test → JAR → проверенный JavaFX JMOD/jlink runtime → jpackage app-image → Inno Setup → optional Authenticode → SHA-256 → manifest`; встроенная Java Runtime без требования Java в Windows; Inno Setup 6 с постоянным AppId, per-user x64-каталогом, безопасным обновлением только известных app-image путей, ярлыками, HKCU-регистрацией AppFleet и безопасным удалением; генерируемые release assets в `dist/release/<version>`; скрипт `scripts/build-release.ps1`; GitHub Actions; README и пример manifest.
+
+**Отклонение ТЗ, подтверждённое компилятором:** `UninstallDisplayVersion` из минимального шаблона стандарта не существует в Inno Setup 6.7.1. Использована существующая `AppVersion`, которая обеспечивает DisplayVersion записи Uninstall Registry; этот факт задокументирован в README.
+
+**Проверки:**
+
+- `./scripts/build-release.ps1 -Version 1.0.0 -RepositoryUrl https://github.com/Pasha-404/AppFleet` успешно сформировал EXE, SHA-256 и manifest;
+- standalone app-image успешно запущен со встроенной Runtime;
+- silent install `1.0.0` завершился кодом `0`, создал AppFleet HKCU-запись с `Version=1.0.0`, `InstallerType=inno` и главным EXE;
+- silent update `1.0.0 → 1.0.1` завершился кодом `0`, обновил версию, сохранил один AppId и одну Uninstall-запись;
+- silent uninstall завершился кодом `0` и удалил тестовый программный каталог и ключ AppFleet;
+- `./gradlew.bat test`, fixture-интеграция, live-интеграция SortIt и `git diff --check` выполнены успешно.
+
+**Осталось:** исходная реализация, автоматические тесты, сборка, installer и документация завершены. Перед публичной публикацией необходимо передать фактический URL репозитория AppFleet в `-PappfleetRepositoryUrl` и, при наличии сертификата, `-PsignCertificateThumbprint`.
