@@ -69,6 +69,6 @@
 
 **Реализовано:** README дополнен инструкциями установки и полным стандартом публикации совместимых приложений; пример `appfleet-manifest.json` стал нейтральным шаблоном; добавлен CHANGELOG; GitHub Actions по push тега `v<SemVer>` теперь строит тот же Windows-пакет, публикует артефакты и создаёт Release с installer, SHA-256 и manifest. Публикация создаёт Release как draft и открывает его только после загрузки всех assets.
 
-**Осталось:** запушить исходный код и тег `v1.0.0` в публичный репозиторий `Pasha-404/AppFleet`, дождаться GitHub Actions и сверить опубликованные assets.
+**Осталось:** опубликовать корректирующий тег `v1.0.1` и подтвердить автоматическое создание Release обновлённым GitHub Actions workflow.
 
-**Проверки:** README и JSON-шаблон разобраны без ошибок; синтаксис скрипта публикации PowerShell корректен; `./scripts/build-release.ps1 -Version 1.0.0 -RepositoryUrl https://github.com/Pasha-404/AppFleet` успешно выполнила чистую сборку, тесты, Inno Setup, SHA-256 и manifest; `git diff --check` без замечаний.
+**Проверки:** README и JSON-шаблон разобраны без ошибок; синтаксис скрипта публикации PowerShell корректен; `./scripts/build-release.ps1 -Version 1.0.0 -RepositoryUrl https://github.com/Pasha-404/AppFleet` успешно выполнила чистую сборку, тесты, Inno Setup, SHA-256 и manifest. Исходный код и тег `v1.0.0` опубликованы в `Pasha-404/AppFleet`; GitHub Release содержит installer, SHA-256 и manifest, а GitHub digest установщика совпал с опубликованной контрольной суммой. Пустые drafts от неудачных попыток удалены; `git diff --check` без замечаний.

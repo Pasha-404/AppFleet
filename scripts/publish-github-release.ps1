@@ -57,12 +57,23 @@ $payload = [ordered]@{
     generate_release_notes = $false
 } | ConvertTo-Json -Compress
 
-$release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases" -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $payload
+$releases = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases?per_page=100" -Headers $headers)
+$published = @($releases | Where-Object { $_.tag_name -eq $Tag -and -not $_.draft })
+if ($published.Count -gt 0) { throw "Release $Tag already exists and is published." }
+$release = @($releases | Where-Object { $_.tag_name -eq $Tag -and $_.draft } | Sort-Object created_at -Descending | Select-Object -First 1)
+if ($release.Count -eq 0) {
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases" -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $payload
+} else {
+    $release = $release[0]
+}
 try {
-    $uploadUrl = $release.upload_url -replace '\{\?name,label\}$', ''
+    $uploadUrl = $release.upload_url.Split('{')[0]
+    $existingAssets = @($release.assets | ForEach-Object name)
     foreach ($asset in $assets) {
-        $name = [System.Uri]::EscapeDataString((Split-Path $asset -Leaf))
-        Invoke-WebRequest -Uri "$uploadUrl?name=$name" -Method Post -Headers $headers -ContentType 'application/octet-stream' -InFile $asset -UseBasicParsing | Out-Null
+        $assetName = Split-Path $asset -Leaf
+        if ($existingAssets -contains $assetName) { continue }
+        $name = [System.Uri]::EscapeDataString($assetName)
+        Invoke-WebRequest -Uri "${uploadUrl}?name=$name" -Method Post -Headers $headers -ContentType 'application/octet-stream' -InFile $asset -UseBasicParsing | Out-Null
     }
     $published = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/$($release.id)" -Method Patch -Headers $headers -ContentType 'application/json; charset=utf-8' -Body '{"draft":false}'
     Write-Output "Published $($published.html_url) with $($assets.Count) assets."
