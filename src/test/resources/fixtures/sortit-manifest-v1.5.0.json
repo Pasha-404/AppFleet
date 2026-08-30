@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "appId": "f238fccc-4f33-429d-b476-7cd286adb376",
+  "name": "SortIt",
+  "technicalName": "SortIt",
+  "version": "1.5.0",
+  "repositoryUrl": "https://github.com/Pasha-404/sortit",
+  "platform": "windows",
+  "architecture": "x64",
+  "installer": {
+    "type": "inno",
+    "assetName": "SortIt-Setup-1.5.0-x64.exe",
+    "sha256AssetName": "SortIt-Setup-1.5.0-x64.exe.sha256",
+    "silentArgs": ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"]
+  },
+  "detection": {
+    "registryKey": "HKCU\\Software\\PashaApps\\f238fccc-4f33-429d-b476-7cd286adb376",
+    "versionValue": "Version",
+    "executableValue": "Executable"
+  },
+  "processNames": ["SortIt.exe"],
+  "minimumAppFleetVersion": "1.0.0"
+}

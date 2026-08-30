@@ -1,0 +1,15 @@
+{
+  "id": 264734621,
+  "tag_name": "v1.5.0",
+  "name": "SortIt 1.5.0",
+  "body": "Windows installer standard: per-user x64 Setup EXE with embedded Java 21 runtime.",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-08-29T13:07:14Z",
+  "html_url": "https://github.com/Pasha-404/sortit/releases/tag/v1.5.0",
+  "assets": [
+    {"id": 535231681, "name": "appfleet-manifest.json", "size": 869, "content_type": "application/json", "browser_download_url": "https://github.com/Pasha-404/sortit/releases/download/v1.5.0/appfleet-manifest.json"},
+    {"id": 535231686, "name": "SortIt-Setup-1.5.0-x64.exe", "size": 21963110, "content_type": "application/vnd.microsoft.portable-executable", "browser_download_url": "https://github.com/Pasha-404/sortit/releases/download/v1.5.0/SortIt-Setup-1.5.0-x64.exe"},
+    {"id": 535231685, "name": "SortIt-Setup-1.5.0-x64.exe.sha256", "size": 93, "content_type": "text/plain", "browser_download_url": "https://github.com/Pasha-404/sortit/releases/download/v1.5.0/SortIt-Setup-1.5.0-x64.exe.sha256"}
+  ]
+}

@@ -55,6 +55,14 @@ tasks.withType(Test).configureEach {
     }
 }
 
+tasks.register('liveIntegrationTest', Test) {
+    group = 'verification'
+    description = 'Runs opt-in integration tests against the public SortIt GitHub release.'
+    useJUnitPlatform { includeTags 'live' }
+    systemProperty 'runLiveTests', 'true'
+    shouldRunAfter tasks.named('test')
+}
+
 tasks.named('jar') {
     manifest {
         attributes('Main-Class': application.mainClass.get(), 'Implementation-Version': project.version)
