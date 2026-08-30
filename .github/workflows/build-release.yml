@@ -11,14 +11,14 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -38,3 +38,11 @@ jobs:
           name: AppFleet-release-${{ github.ref_name }}
           path: dist/release/*
           if-no-files-found: error
+      - name: Publish GitHub Release for a version tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $version = '${{ github.ref_name }}'.TrimStart('v')
+          .\scripts\publish-github-release.ps1 -Repository '${{ github.repository }}' -Tag '${{ github.ref_name }}' -ReleaseDirectory "dist\release\$version"

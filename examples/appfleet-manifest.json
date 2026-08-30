@@ -1,24 +1,23 @@
 {
   "schemaVersion": 1,
-  "appId": "5dce5095-1140-4ceb-8a85-99e029c73468",
-  "name": "AppFleet",
-  "technicalName": "AppFleet",
-  "version": "1.0.0",
-  "repositoryUrl": "https://github.com/OWNER/AppFleet",
+  "appId": "11111111-2222-4333-8444-555555555555",
+  "name": "My Product",
+  "technicalName": "MyProduct",
+  "version": "1.4.0",
+  "repositoryUrl": "https://github.com/OWNER/MyProduct",
   "platform": "windows",
   "architecture": "x64",
   "installer": {
     "type": "inno",
-    "assetName": "AppFleet-Setup-1.0.0-x64.exe",
-    "sha256AssetName": "AppFleet-Setup-1.0.0-x64.exe.sha256",
+    "assetName": "MyProduct-Setup-1.4.0-x64.exe",
+    "sha256AssetName": "MyProduct-Setup-1.4.0-x64.exe.sha256",
     "silentArgs": ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"]
   },
   "detection": {
-    "registryKey": "HKCU\\Software\\PashaApps\\5dce5095-1140-4ceb-8a85-99e029c73468",
+    "registryKey": "HKCU\\Software\\PashaApps\\11111111-2222-4333-8444-555555555555",
     "versionValue": "Version",
     "executableValue": "Executable"
   },
-  "processNames": ["AppFleet.exe"],
+  "processNames": ["MyProduct.exe"],
   "minimumAppFleetVersion": "1.0.0"
 }
-
