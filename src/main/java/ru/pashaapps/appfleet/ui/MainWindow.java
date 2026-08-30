@@ -75,31 +75,25 @@ public final class MainWindow {
     private Node sidebar() {
         Button apps = navigationButton("Приложения", () -> content.getChildren().setAll(applicationsPage));
         Button journal = navigationButton("Журнал", () -> { refreshJournal(); content.getChildren().setAll(journalPage); });
+        Button check = sidebarActionButton("Проверить", this::refreshApplications);
+        Button add = sidebarActionButton("Добавить репозиторий", this::addRepository); add.getStyleClass().add("primary");
+        statusLine.setWrapText(true);
+        statusLine.getStyleClass().add("muted");
         Region spacer = new Region(); VBox.setVgrow(spacer, Priority.ALWAYS);
         CheckBox restart = new CheckBox("Повторно запускать приложение после обновления, если оно было запущено"); restart.setWrapText(true); restart.setSelected(service.settings().restartPreviouslyRunningApp());
         CheckBox delete = new CheckBox("Удалять скачанные установщики после успешной установки"); delete.setWrapText(true); delete.setSelected(service.settings().deleteInstallerAfterSuccess());
         restart.selectedProperty().addListener((observable, wasSelected, selected) -> saveSettings(new UserSettings(selected, delete.isSelected())));
         delete.selectedProperty().addListener((observable, wasSelected, selected) -> saveSettings(new UserSettings(restart.isSelected(), selected)));
         Label version = new Label("Версия AppFleet: " + build.version()); version.setWrapText(true); version.getStyleClass().add("muted");
-        VBox box = new VBox(8, apps, journal, spacer, new Separator(), restart, delete, new Separator(), version);
+        VBox box = new VBox(8, apps, journal, new Separator(), check, add, statusLine, spacer, new Separator(), restart, delete, new Separator(), version);
         box.setPrefWidth(255); box.setMinWidth(220); box.setPadding(new Insets(18, 14, 18, 14)); box.getStyleClass().add("sidebar");
         return box;
     }
     private Button navigationButton(String text, Runnable action) { Button button = new Button(text); button.setMaxWidth(Double.MAX_VALUE); button.getStyleClass().add("navigation"); button.setOnAction(event -> action.run()); return button; }
+    private Button sidebarActionButton(String text, Runnable action) { Button button = new Button(text); button.setMaxWidth(Double.MAX_VALUE); button.setOnAction(event -> action.run()); return button; }
     private Node applicationsPage() {
-        Label heading = new Label("Приложения"); heading.getStyleClass().add("page-heading");
-        Button check = new Button("Проверить"); check.setOnAction(event -> refreshApplications());
-        Button add = new Button("Добавить репозиторий"); add.getStyleClass().add("primary"); add.setOnAction(event -> addRepository());
-        HBox actions = new HBox(12, check, add);
-        actions.setAlignment(Pos.CENTER_RIGHT);
-        actions.setMinWidth(Region.USE_PREF_SIZE);
-        statusLine.setMinWidth(0);
-        statusLine.setMaxWidth(Double.MAX_VALUE);
-        statusLine.setTextOverrun(OverrunStyle.ELLIPSIS);
-        HBox.setHgrow(statusLine, Priority.ALWAYS);
-        HBox commands = new HBox(12, heading, statusLine, actions); commands.setAlignment(Pos.CENTER_LEFT); commands.setMinWidth(0); commands.setPadding(new Insets(20, 24, 12, 24)); commands.getStyleClass().add("command-bar");
         configureApplicationsTable();
-        VBox page = new VBox(commands, applicationsTable); VBox.setVgrow(applicationsTable, Priority.ALWAYS); page.getStyleClass().add("content-page");
+        VBox page = new VBox(applicationsTable); VBox.setVgrow(applicationsTable, Priority.ALWAYS); page.getStyleClass().add("content-page");
         return page;
     }
     private void configureApplicationsTable() {
