@@ -5,6 +5,8 @@ plugins {
 
 group = 'ru.pashaapps'
 version = providers.gradleProperty('version').orElse('1.0.0').get()
+def appfleetRepositoryUrl = providers.gradleProperty('appfleetRepositoryUrl').orElse('https://github.com/Pasha-404/AppFleet')
+def appfleetAppId = providers.gradleProperty('appfleetAppId').orElse('5dce5095-1140-4ceb-8a85-99e029c73468')
 
 ext {
     javaVersion = 21
@@ -66,5 +68,25 @@ tasks.register('liveIntegrationTest', Test) {
 tasks.named('jar') {
     manifest {
         attributes('Main-Class': application.mainClass.get(), 'Implementation-Version': project.version)
+    }
+}
+
+def generatedResources = layout.buildDirectory.dir('generated/resources/main')
+tasks.register('generateBuildInfo') {
+    outputs.file(generatedResources.map { it.file('appfleet-build.properties') })
+    doLast {
+        def output = generatedResources.get().file('appfleet-build.properties').asFile
+        output.parentFile.mkdirs()
+        output.text = "version=${project.version}\nrepositoryUrl=${appfleetRepositoryUrl.get()}\nappId=${appfleetAppId.get()}\n"
+    }
+}
+sourceSets.main.resources.srcDir(generatedResources)
+tasks.named('processResources') { dependsOn tasks.named('generateBuildInfo') }
+
+tasks.named('run', JavaExec) {
+    doFirst {
+        def javafxJars = configurations.runtimeClasspath.files.findAll { it.name.startsWith('javafx-') }
+        jvmArgs '--module-path', javafxJars.collect { it.absolutePath }.join(File.pathSeparator), '--add-modules', 'javafx.controls,javafx.graphics,javafx.base'
+        classpath = sourceSets.main.runtimeClasspath.minus(files(javafxJars))
     }
 }

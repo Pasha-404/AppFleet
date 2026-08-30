@@ -1,0 +1,13 @@
+.root { -fx-font-family: "Segoe UI", Arial, sans-serif; -fx-background-color: #f7f8fa; }
+.title-bar { -fx-background-color: #ffffff; -fx-border-color: transparent transparent #dde2e8 transparent; }
+.app-title { -fx-font-size: 20px; -fx-font-weight: bold; }
+.sidebar { -fx-background-color: #f0f3f7; -fx-border-color: transparent #d6dce5 transparent transparent; }
+.navigation { -fx-background-color: transparent; -fx-alignment: CENTER-LEFT; -fx-padding: 9 10 9 10; }
+.navigation:hover { -fx-background-color: #dbeafe; }
+.page-heading { -fx-font-size: 22px; -fx-font-weight: bold; }
+.command-bar { -fx-background-color: #ffffff; -fx-border-color: transparent transparent #dde2e8 transparent; }
+.primary { -fx-background-color: #2563eb; -fx-text-fill: white; -fx-font-weight: bold; }
+.muted { -fx-text-fill: #64748b; }
+.table-view { -fx-background-color: white; }
+.table-view .column-header { -fx-background-color: #eef2f7; -fx-font-weight: bold; }
+.table-row-cell { -fx-cell-size: 53px; }

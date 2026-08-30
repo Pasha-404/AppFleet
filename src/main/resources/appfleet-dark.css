@@ -1,0 +1,13 @@
+.root { -fx-font-family: "Segoe UI", Arial, sans-serif; -fx-background-color: #1e2430; -fx-text-fill: #edf2f7; }
+.title-bar, .command-bar { -fx-background-color: #252d3a; -fx-border-color: transparent transparent #3d4757 transparent; }
+.app-title, .label, .check-box { -fx-text-fill: #edf2f7; }
+.sidebar { -fx-background-color: #252d3a; -fx-border-color: transparent #3d4757 transparent transparent; }
+.navigation { -fx-background-color: transparent; -fx-text-fill: #edf2f7; -fx-alignment: CENTER-LEFT; -fx-padding: 9 10 9 10; }
+.navigation:hover { -fx-background-color: #35445a; }
+.page-heading { -fx-font-size: 22px; -fx-font-weight: bold; }
+.primary { -fx-background-color: #3b82f6; -fx-text-fill: white; -fx-font-weight: bold; }
+.muted { -fx-text-fill: #b4c2d2; }
+.table-view, .table-view .virtual-flow .clipped-container .sheet, .table-row-cell { -fx-background-color: #202938; -fx-text-fill: #edf2f7; }
+.table-view .column-header { -fx-background-color: #303b4d; -fx-text-fill: #edf2f7; }
+.table-view .column-header .label, .table-cell { -fx-text-fill: #edf2f7; }
+.table-row-cell { -fx-cell-size: 53px; }

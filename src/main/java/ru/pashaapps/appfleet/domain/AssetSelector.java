@@ -12,7 +12,7 @@ public final class AssetSelector {
     private static final Set<String> ZIP_MARKERS = Set.of("portable", "win", "windows", "x64", "amd64");
 
     public AssetSelection select(GithubRelease release, AssetSelectionRule rememberedRule) {
-        List<ReleaseAsset> eligible = release.assets().stream().filter(this::isEligible).toList();
+        List<ReleaseAsset> eligible = eligibleAssets(release);
         if (rememberedRule != null) {
             List<ReleaseAsset> remembered = eligible.stream().filter(rememberedRule::matches).toList();
             if (remembered.size() == 1) return new AssetSelection.Selected(remembered.getFirst(), false);
@@ -22,6 +22,11 @@ public final class AssetSelector {
         int bestPriority = eligible.stream().mapToInt(this::priority).min().orElseThrow();
         List<ReleaseAsset> best = eligible.stream().filter(asset -> priority(asset) == bestPriority).toList();
         return best.size() == 1 ? new AssetSelection.Selected(best.getFirst(), false) : new AssetSelection.NeedsChoice(best);
+    }
+
+    /** Candidates that may safely be offered for an explicit user selection. */
+    public List<ReleaseAsset> eligibleAssets(GithubRelease release) {
+        return release.assets().stream().filter(this::isEligible).toList();
     }
 
     private boolean isEligible(ReleaseAsset asset) {
