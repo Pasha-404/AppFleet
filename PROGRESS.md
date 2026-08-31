@@ -120,3 +120,11 @@
 **Осталось:** локальная поставка `1.0.5` должна быть собрана и опубликована; затем нужно сверить assets GitHub Release.
 
 **Проверки:** на Windows 11 вручную выполнен silent запуск настоящего `SortIt-Setup-1.5.0-x64.exe` с аргументами из manifest; подтверждены `SortIt.exe` и точная HKCU-запись с версией `1.5.0`. `./gradlew.bat test liveIntegrationTest` успешно завершилась. Новая `./gradlew.bat liveInstallIntegrationTest` удалила и заново установила SortIt через `AppFleetService`; после исправления test успешно подтвердил `UP_TO_DATE` и наличие записи реестра. `git diff --check` будет выполнен перед коммитом.
+
+## Этап 15 — выпуск исправления установки SortIt
+
+**Реализовано:** опубликован GitHub Release `v1.0.5`. В нём AppFleet ожидает завершения стандартной установки Inno Setup по фактической HKCU-записи и EXE, а затем обновляет строку таблицы по новому, а не сохранённому ETag-снимку. Это устраняет ситуацию, при которой результат сообщал об успешной установке SortIt, но кнопка оставалась «Установить».
+
+**Осталось:** все заявленные работы по этому сценарию завершены. Для проверки на отдельном ПК следует установить `v1.0.5` поверх предыдущей версии и повторить установку SortIt из `https://github.com/Pasha-404/sortit`.
+
+**Проверки:** GitHub Actions `v1.0.5` успешно завершился: <https://github.com/Pasha-404/AppFleet/actions/runs/33390806922>. Через GitHub API подтверждено, что Release публичный и содержит `AppFleet-Setup-1.0.5-x64.exe`, его SHA-256 и `appfleet-manifest.json`; опубликованная контрольная сумма совпадает с локально собранным installer. До публикации `./gradlew.bat test liveIntegrationTest` и `./gradlew.bat liveInstallIntegrationTest` успешно завершились; второй тест удалил и заново установил реальный SortIt `1.5.0` через AppFleetService, подтвердив `UP_TO_DATE`, запись HKCU и файл `SortIt.exe`. `git diff --check` выполнен без замечаний.
