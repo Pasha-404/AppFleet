@@ -25,5 +25,6 @@ class SelfUpdateServiceTest {
         assertTrue(installerScript.contains("Flags: nowait; Check: IsAppFleetSelfUpdate"));
         assertTrue(installerScript.contains("Flags: nowait postinstall skipifsilent; Check: not IsAppFleetSelfUpdate"));
         assertTrue(installerScript.contains("CompareText(ParamStr(Index), '/APPFLEETSELFUPDATE') = 0"));
+        assertTrue(installerScript.contains("Result := HasCloseApplications and HasLegacyRestart"));
     }
 }

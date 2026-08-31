@@ -141,6 +141,14 @@
 
 **Реализовано:** Inno Setup различает обычную silent-установку и self-update. `SelfUpdateService` передаёт installer отдельный аргумент `/APPFLEETSELFUPDATE`; только с ним `[Run]` запускает новую версию AppFleet после замены файлов. Стандартный silent install по-прежнему не запускает GUI. Добавлен unit-тест команды запуска и условий Inno Setup.
 
-**Осталось:** локальный installer `v1.0.7` собран. Требуется опубликовать его, затем выполнить реальный переход `v1.0.6 → v1.0.7` и подтвердить запуск новой версии.
+**Осталось:** live-тест `v1.0.6 → v1.0.7` с новым флагом подтвердил обновление и запуск, но обнаружил совместимость: старые AppFleet `1.0.0–1.0.6` используют пару `/CLOSEAPPLICATIONS` и `/RESTARTAPPLICATIONS`. Её нужно вернуть в новом installer, чтобы обновление началось без ручной установки.
 
-**Проверки:** `./gradlew.bat test` успешно завершилась с тестами self-update-команды и installer-условий. Первая сборка выявила и устранила несовместимый с Inno Setup 6.7.1 вызов `CmdLineParamExists`; итоговая `./scripts/build-release.ps1 -Version 1.0.7 -RepositoryUrl https://github.com/Pasha-404/AppFleet` успешно выполнила тесты, jlink, jpackage, Inno Setup, SHA-256 и manifest. `git diff --check` будет выполнен перед коммитом.
+**Проверки:** `./gradlew.bat test` успешно завершилась с тестами self-update-команды и installer-условий. Первая сборка выявила и устранила несовместимый с Inno Setup 6.7.1 вызов `CmdLineParamExists`; итоговая `./scripts/build-release.ps1 -Version 1.0.7 -RepositoryUrl https://github.com/Pasha-404/AppFleet` успешно выполнила тесты, jlink, jpackage, Inno Setup, SHA-256 и manifest. В реальном сценарии на Windows silent-установка `v1.0.6` завершилась кодом `0`, создала HKCU-запись `Version=1.0.6`; затем `v1.0.7` с `/APPFLEETSELFUPDATE` завершилась кодом `0`, заменила запись на `Version=1.0.7` и автоматически запустила установленный `AppFleet.exe`. `git diff --check` выполнен перед коммитом.
+
+## Этап 18 — совместимость самообновления установленных версий
+
+**Реализовано:** Inno Setup распознаёт legacy-пару `/CLOSEAPPLICATIONS` + `/RESTARTAPPLICATIONS` как self-update наряду с новым явным `/APPFLEETSELFUPDATE`. Обычная тихая установка без этой пары не запускает GUI.
+
+**Осталось:** собрать и опубликовать `v1.0.8`, затем в live-тесте выполнить `v1.0.6 → v1.0.8` с исходными legacy-аргументами и подтвердить автоматический запуск новой версии.
+
+**Проверки:** обновлён test installer-условий; полный build и live-сценарий будут выполнены перед коммитом.

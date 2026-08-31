@@ -82,8 +82,12 @@ Filename: "{app}\{#MainExecutable}"; Description: "Запустить {#AppName}
 function IsAppFleetSelfUpdate: Boolean;
 var
   Index: Integer;
+  HasCloseApplications: Boolean;
+  HasLegacyRestart: Boolean;
 begin
   Result := False;
+  HasCloseApplications := False;
+  HasLegacyRestart := False;
   for Index := 1 to ParamCount do
   begin
     if CompareText(ParamStr(Index), '/APPFLEETSELFUPDATE') = 0 then
@@ -91,7 +95,13 @@ begin
       Result := True;
       exit;
     end;
+    if CompareText(ParamStr(Index), '/CLOSEAPPLICATIONS') = 0 then
+      HasCloseApplications := True;
+    if CompareText(ParamStr(Index), '/RESTARTAPPLICATIONS') = 0 then
+      HasLegacyRestart := True;
   end;
+  { Compatibility with AppFleet 1.0.0–1.0.6, which used this argument pair for self-update. }
+  Result := HasCloseApplications and HasLegacyRestart;
 end;
 
 [UninstallDelete]
