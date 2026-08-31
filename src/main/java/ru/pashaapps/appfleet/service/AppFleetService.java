@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.net.http.HttpClient;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -121,7 +122,8 @@ public final class AppFleetService implements AutoCloseable {
         RepositoryId id = new RepositoryId(original.owner(), original.repository());
         try {
             journal.write(id.slug(), "Проверка репозитория", "Начата", "Запрашивается последний stable-релиз", null);
-            GithubResponse<List<GithubRelease>> response = github.listReleases(id, original.releaseEtag());
+            boolean canReuseRetainedSnapshot = snapshots.containsKey(id.normalizedKey()) && original.releaseEtag() != null;
+            GithubResponse<List<GithubRelease>> response = github.listReleases(id, canReuseRetainedSnapshot ? original.releaseEtag() : null);
             if (response.notModified()) {
                 ApplicationSnapshot retained = snapshots.get(id.normalizedKey());
                 if (retained != null) return retained;
@@ -171,16 +173,22 @@ public final class AppFleetService implements AutoCloseable {
             AuthenticodeStatus signature = verifyDownloadedFile(snapshot, installer, operation, cancellation);
             journal.write(id.slug(), "Установка", "Начата", "Запускается " + preview.assetName(), null);
             InstallerExit exit;
+            Optional<InstalledApplication> detectedInstallation = Optional.empty();
             if (preview.packageType() == PackageType.ZIP) {
                 new ManagedZipInstaller(paths.programDirectory().getParent().getParent().resolve("AppFleetManaged")).install(installer.path(), id, cancellation);
                 exit = InstallerExit.forGeneric(0);
             } else {
                 List<String> arguments = snapshot.manifest() == null ? List.of() : snapshot.manifest().installer().silentArgs();
+                journal.write(id.slug(), "Запуск установщика", "Начата", "Запускается " + preview.assetName() + (arguments.isEmpty() ? "" : " с параметрами " + String.join(" ", arguments)), null);
                 exit = new ExternalInstallerRunner().run(installer.path(), preview.packageType(), arguments);
+                journal.write(id.slug(), "Запуск установщика", "Завершён", "Установщик завершил основной процесс с кодом " + exit.code(), null);
+                if (!exit.successful()) throw new IOException(exit.message());
+                if (snapshot.manifest() != null && snapshot.manifest().detection() != null) {
+                    detectedInstallation = Optional.of(new StandardInstallationAwaiter(registry).await(snapshot.manifest().appId(), snapshot.release().tagName(), Duration.ofSeconds(60)));
+                }
             }
-            if (!exit.successful()) throw new IOException(exit.message());
             restartPreviouslyRunning(snapshot, previouslyRunning);
-            RepositoryState installed = withInstalled(snapshot.persisted(), snapshot, preview.packageType());
+            RepositoryState installed = withInstalled(snapshot.persisted(), snapshot, preview.packageType(), detectedInstallation);
             synchronizedUpdateRepositories(repositories.repositories().stream().map(existing -> same(existing, id) ? installed : existing).toList());
             ApplicationSnapshot updated = check(installed);
             synchronized (this) { snapshots.put(id.normalizedKey(), updated); }
@@ -267,9 +275,15 @@ public final class AppFleetService implements AutoCloseable {
     private static RepositoryState emptyState(RepositoryId id) { return new RepositoryState(1, id.owner(), id.repository(), id.canonicalUrl(), null, null, Set.of(), null, null, null, null, null, Set.of(), null, null, null); }
     private static boolean same(RepositoryState state, RepositoryId id) { return (state.owner() + "/" + state.repository()).equalsIgnoreCase(id.slug()); }
     private static AssetSelectionRule toRule(RepositoryState state) { if (state.selectedPackageType() == null || state.selectedArchitecture() == null) return null; try { return new AssetSelectionRule(PackageType.valueOf(state.selectedPackageType()), Architecture.valueOf(state.selectedArchitecture()), state.selectionTokens()); } catch (IllegalArgumentException invalid) { return null; } }
-    private static RepositoryState withRule(RepositoryState state, AssetSelectionRule rule) { return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(), rule.packageType().name(), rule.architecture().name(), rule.requiredTokens(), state.installedVersion(), state.installedAssetId(), state.installedPackageType(), state.installLocation(), state.executable(), state.processNames(), state.releaseEtag(), state.lastCheckedAt(), state.lastCheckResult()); }
+    private static RepositoryState withRule(RepositoryState state, AssetSelectionRule rule) { return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(), rule.packageType().name(), rule.architecture().name(), rule.requiredTokens(), state.installedVersion(), state.installedAssetId(), state.installedPackageType(), state.installLocation(), state.executable(), state.processNames(), null, state.lastCheckedAt(), state.lastCheckResult()); }
     private static RepositoryState withCheck(RepositoryState state, String etag, String result) { return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(), state.selectedPackageType(), state.selectedArchitecture(), state.selectionTokens(), state.installedVersion(), state.installedAssetId(), state.installedPackageType(), state.installLocation(), state.executable(), state.processNames(), etag, Instant.now(), result); }
-    private static RepositoryState withInstalled(RepositoryState state, ApplicationSnapshot snapshot, PackageType type) { Set<String> names = snapshot.manifest() == null ? state.processNames() : Set.copyOf(snapshot.manifest().processNames()); return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(), state.selectedPackageType(), state.selectedArchitecture(), state.selectionTokens(), snapshot.release().tagName(), snapshot.selectedAsset().id(), type.name(), state.installLocation(), state.executable(), names, state.releaseEtag(), Instant.now(), "Установлено"); }
+    private static RepositoryState withInstalled(RepositoryState state, ApplicationSnapshot snapshot, PackageType type, Optional<InstalledApplication> detected) {
+        Set<String> names = snapshot.manifest() == null ? state.processNames() : Set.copyOf(snapshot.manifest().processNames());
+        String version = detected.map(InstalledApplication::version).orElse(snapshot.release().tagName());
+        String location = detected.map(application -> application.installLocation().toString()).orElse(state.installLocation());
+        String executable = detected.map(application -> application.executable().toString()).orElse(state.executable());
+        return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(), state.selectedPackageType(), state.selectedArchitecture(), state.selectionTokens(), version, snapshot.selectedAsset().id(), type.name(), location, executable, names, null, Instant.now(), "Установлено");
+    }
     private synchronized void synchronizedUpdateRepositories(List<RepositoryState> updated) { saveRepositories(updated); }
     private void saveRepositories(List<RepositoryState> updated) { try { repositories = new RepositoriesDocument(1, updated); repositoriesStore.write(repositories); } catch (IOException failure) { throw new IllegalStateException("Не удалось сохранить список репозиториев", failure); } }
     private static void deleteOperationDirectory(Path operation) { try { if (!Files.exists(operation)) return; try (var walk = Files.walk(operation)) { walk.sorted(Comparator.reverseOrder()).forEach(path -> { try { Files.deleteIfExists(path); } catch (IOException ignored) { } }); } } catch (IOException ignored) { } }

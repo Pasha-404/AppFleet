@@ -73,6 +73,14 @@ tasks.register('liveIntegrationTest', Test) {
     shouldRunAfter tasks.named('test')
 }
 
+tasks.register('liveInstallIntegrationTest', Test) {
+    group = 'verification'
+    description = 'Runs the opt-in real SortIt uninstall/install scenario through AppFleetService on Windows.'
+    useJUnitPlatform { includeTags 'live-install' }
+    systemProperty 'runLiveInstallTests', 'true'
+    shouldRunAfter tasks.named('test')
+}
+
 tasks.named('jar') {
     manifest {
         attributes('Main-Class': application.mainClass.get(), 'Implementation-Version': project.version)
