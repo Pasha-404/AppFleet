@@ -99,6 +99,7 @@ public final class MainWindow {
     private void configureApplicationsTable() {
         applicationsTable.setColumnResizePolicy(TableView.UNCONSTRAINED_RESIZE_POLICY);
         applicationsTable.getColumns().setAll(List.of(
+                actionColumn(),
                 textColumn("Приложение", 235, item -> item.displayName() + "\n" + item.repository().slug()),
                 textColumn("Состояние", 185, item -> item.status().display()),
                 textColumn("Установленная версия", 145, item -> emptyToDash(item.installedVersion())),
@@ -106,14 +107,25 @@ public final class MainWindow {
                 textColumn("Дата релиза", 145, item -> item.release() == null ? "—" : DATE_TIME.format(item.release().publishedAt())),
                 textColumn("Файл", 245, ApplicationSnapshot::assetName),
                 textColumn("Размер", 105, item -> item.selectedAsset() == null ? "—" : humanSize(item.selectedAsset().size())),
-                actionColumn(), menuColumn()));
+                menuColumn()));
         applicationsTable.setPlaceholder(new Label("Добавьте публичный GitHub-репозиторий, чтобы начать."));
         applicationsTable.setMinWidth(0);
     }
     private TableColumn<ApplicationSnapshot, String> textColumn(String title, double width, Function<ApplicationSnapshot, String> value) {
         TableColumn<ApplicationSnapshot, String> column = new TableColumn<>(title); column.setPrefWidth(width); column.setMinWidth(width);
         column.setCellValueFactory(data -> new ReadOnlyStringWrapper(value.apply(data.getValue())));
-        column.setCellFactory(ignored -> { TableCell<ApplicationSnapshot, String> cell = new TableCell<>(); cell.setWrapText(true); return cell; });
+        column.setCellFactory(ignored -> new TableCell<>() {
+            {
+                setWrapText(true);
+            }
+
+            @Override
+            protected void updateItem(String value, boolean empty) {
+                super.updateItem(value, empty);
+                setText(empty ? null : value);
+                setGraphic(null);
+            }
+        });
         return column;
     }
     private TableColumn<ApplicationSnapshot, Void> actionColumn() {
