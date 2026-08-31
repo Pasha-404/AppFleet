@@ -104,3 +104,11 @@
 **Осталось:** локальный installer `1.0.4` готов; требуется публикация `v1.0.4` и сверка его assets.
 
 **Проверки:** `./gradlew.bat test liveIntegrationTest` успешно завершилась; `./scripts/build-release.ps1 -Version 1.0.4 -RepositoryUrl https://github.com/Pasha-404/AppFleet` успешно создал установщик; `./gradlew.bat verifyReleaseMetadata '-Pversion=1.0.4' '-PappfleetRepositoryUrl=https://github.com/Pasha-404/AppFleet'` успешно сверила installer, SHA-256 и manifest; `git diff --check` без замечаний.
+
+## Этап 13 — публикация финального исправления
+
+**Реализовано:** опубликован GitHub Release `v1.0.4` с исправлениями таблицы, установки неподписанного EXE и читаемости тёмных всплывающих элементов. Это рекомендуемая версия для установки.
+
+**Осталось:** работа по всем сообщениям из приложенных скриншотов завершена. Следующая проверка — установить `v1.0.4` на Windows 11, добавить `https://github.com/Pasha-404/sortit` и подтвердить установку SortIt.
+
+**Проверки:** GitHub Actions `v1.0.4` успешно завершился: <https://github.com/Pasha-404/AppFleet/actions/runs/33388295076>. Через GitHub API проверены три обязательных asset Release, версия manifest `1.0.4`, имя installer и имя checksum; опубликованный SHA-256 совпал с digest installer GitHub. `git diff --check` без замечаний.
