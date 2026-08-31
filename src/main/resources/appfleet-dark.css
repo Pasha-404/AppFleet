@@ -11,3 +11,9 @@
 .table-view .column-header { -fx-background-color: #303b4d; -fx-text-fill: #edf2f7; }
 .table-view .column-header .label, .table-cell { -fx-text-fill: #edf2f7; }
 .table-row-cell { -fx-cell-size: 53px; }
+.context-menu { -fx-background-color: #303b4d; -fx-border-color: #4b5a70; }
+.context-menu .menu-item:focused { -fx-background-color: #3b82f6; }
+.context-menu .menu-item .label { -fx-text-fill: #edf2f7; }
+.dialog-pane, .dialog-pane .button-bar .container { -fx-background-color: #252d3a; }
+.dialog-pane .header-panel { -fx-background-color: #303b4d; }
+.dialog-pane .header-panel .label, .dialog-pane .content.label { -fx-text-fill: #edf2f7; }
