@@ -74,7 +74,25 @@ Root: HKCU; Subkey: "Software\PashaApps\{#AppId}"; ValueType: string; ValueName:
 Root: HKCU; Subkey: "Software\PashaApps\{#AppId}"; ValueType: string; ValueName: "Publisher"; ValueData: "PashaApps"
 
 [Run]
-Filename: "{app}\{#MainExecutable}"; Description: "Запустить {#AppName}"; Flags: nowait postinstall skipifsilent
+; A normal silent install must not launch an application. Self-update is explicit and must restart AppFleet after files are replaced.
+Filename: "{app}\{#MainExecutable}"; Description: "Запустить {#AppName}"; Flags: nowait; Check: IsAppFleetSelfUpdate
+Filename: "{app}\{#MainExecutable}"; Description: "Запустить {#AppName}"; Flags: nowait postinstall skipifsilent; Check: not IsAppFleetSelfUpdate
+
+[Code]
+function IsAppFleetSelfUpdate: Boolean;
+var
+  Index: Integer;
+begin
+  Result := False;
+  for Index := 1 to ParamCount do
+  begin
+    if CompareText(ParamStr(Index), '/APPFLEETSELFUPDATE') = 0 then
+    begin
+      Result := True;
+      exit;
+    end;
+  end;
+end;
 
 [UninstallDelete]
 ; Do not touch %APPDATA% or cache/logs. Remove only known program files and an empty program directory.

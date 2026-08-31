@@ -136,3 +136,11 @@
 **Осталось:** этап завершён. На Windows следует установить `v1.0.6` поверх предыдущей версии. При временном ограничении GitHub строка ранее проверенного приложения сохранится; точное время следующей попытки фиксируется в журнале.
 
 **Проверки:** `./gradlew.bat test` успешно: добавлены fixture-проверки автоматического повтора HTTP 503 и времени разблокировки HTTP 429, сериализация release-кэша с manifest, а также сценарий сервиса «успешная проверка → 429 → повторная проверка без нового HTTP-запроса». `./gradlew.bat liveIntegrationTest` успешно проверила настоящий public GitHub Release SortIt `v1.5.0`. `./scripts/build-release.ps1 -Version 1.0.6 -RepositoryUrl https://github.com/Pasha-404/AppFleet` успешно создала Windows installer, SHA-256 и manifest. GitHub Actions `v1.0.6` успешно завершился: <https://github.com/Pasha-404/AppFleet/actions/runs/33392072857>. Через GitHub API подтверждено, что Release публичный, содержит три обязательных asset, manifest версии `1.0.6`, а опубликованный SHA-256 совпадает с GitHub digest установщика. `git diff --check` выполнен без замечаний.
+
+## Этап 17 — перезапуск после самообновления
+
+**Реализовано:** Inno Setup различает обычную silent-установку и self-update. `SelfUpdateService` передаёт installer отдельный аргумент `/APPFLEETSELFUPDATE`; только с ним `[Run]` запускает новую версию AppFleet после замены файлов. Стандартный silent install по-прежнему не запускает GUI. Добавлен unit-тест команды запуска и условий Inno Setup.
+
+**Осталось:** локальный installer `v1.0.7` собран. Требуется опубликовать его, затем выполнить реальный переход `v1.0.6 → v1.0.7` и подтвердить запуск новой версии.
+
+**Проверки:** `./gradlew.bat test` успешно завершилась с тестами self-update-команды и installer-условий. Первая сборка выявила и устранила несовместимый с Inno Setup 6.7.1 вызов `CmdLineParamExists`; итоговая `./scripts/build-release.ps1 -Version 1.0.7 -RepositoryUrl https://github.com/Pasha-404/AppFleet` успешно выполнила тесты, jlink, jpackage, Inno Setup, SHA-256 и manifest. `git diff --check` будет выполнен перед коммитом.

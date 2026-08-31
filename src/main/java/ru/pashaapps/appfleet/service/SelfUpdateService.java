@@ -16,6 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -69,8 +70,12 @@ public final class SelfUpdateService {
         if (!verifier.matches(installer.path(), verifier.parseSha256Asset(checksum.path(), installer.path().getFileName().toString()))) throw new IOException("SHA-256 обновления AppFleet не совпал");
         if (new AuthenticodeVerifier().verify(installer.path()) == AuthenticodeStatus.INVALID) throw new IOException("Цифровая подпись обновления AppFleet недействительна");
         markerStore.write(new SelfUpdateMarker(offer.manifest().version(), previous.map(marker -> marker.attempts() + 1).orElse(1), operation.toString(), Instant.now()));
-        new ProcessBuilder(installer.path().toString(), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS").start();
+        new ProcessBuilder(commandFor(installer.path())).start();
         return true;
+    }
+
+    static List<String> commandFor(Path installer) {
+        return List.of(installer.toString(), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/APPFLEETSELFUPDATE");
     }
     private AppFleetManifest readManifest(RepositoryId repository, GithubRelease release) {
         ReleaseAsset asset = release.assets().stream().filter(candidate -> candidate.name().equals("appfleet-manifest.json")).findFirst().orElseThrow(() -> new IllegalArgumentException("В релизе AppFleet отсутствует appfleet-manifest.json"));
