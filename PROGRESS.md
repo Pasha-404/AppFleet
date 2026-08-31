@@ -88,3 +88,11 @@
 **Осталось:** исправленная локальная поставка 1.0.3 готова; требуется опубликовать `v1.0.3` и сверить assets GitHub Release.
 
 **Проверки:** `./gradlew.bat test liveIntegrationTest` успешно завершилась; `./scripts/build-release.ps1 -Version 1.0.3 -RepositoryUrl https://github.com/Pasha-404/AppFleet` успешно выполнила тесты, jlink, jpackage, Inno Setup, SHA-256 и проверку release metadata; `git diff --check` без замечаний.
+
+## Этап 11 — публикация исправленного установщика
+
+**Реализовано:** опубликованы patch-релизы `v1.0.2` и финальный `v1.0.3`; для установки и дальнейшего тестирования следует использовать `v1.0.3`. Релиз содержит Windows x64 installer, SHA-256 и `appfleet-manifest.json`.
+
+**Осталось:** по описанным проблемам работа завершена. Дополнительное тестирование установки SortIt можно выполнить на Windows 11 с installer `v1.0.3`.
+
+**Проверки:** GitHub Actions `v1.0.3` успешно завершился: <https://github.com/Pasha-404/AppFleet/actions/runs/33387878991>. Через GitHub API подтверждено, что Release публичный, содержит три обязательных asset; SHA-256 installer совпадает с digest GitHub; manifest содержит версию `1.0.3`, имя installer и имя checksum. `git diff --check` без замечаний.
