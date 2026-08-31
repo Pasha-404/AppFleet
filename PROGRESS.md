@@ -149,6 +149,6 @@
 
 **Реализовано:** Inno Setup распознаёт legacy-пару `/CLOSEAPPLICATIONS` + `/RESTARTAPPLICATIONS` как self-update наряду с новым явным `/APPFLEETSELFUPDATE`. Обычная тихая установка без этой пары не запускает GUI.
 
-**Осталось:** собрать и опубликовать `v1.0.8`, затем в live-тесте выполнить `v1.0.6 → v1.0.8` с исходными legacy-аргументами и подтвердить автоматический запуск новой версии.
+**Осталось:** этап завершён. Для любого установленного AppFleet `1.0.0–1.0.7` достаточно открыть приложение и подтвердить предлагаемое обновление; при проблеме пользователь может установить `v1.0.8` поверх существующей версии вручную.
 
-**Проверки:** обновлён test installer-условий; полный build и live-сценарий будут выполнены перед коммитом.
+**Проверки:** `./scripts/build-release.ps1 -Version 1.0.8 -RepositoryUrl https://github.com/Pasha-404/AppFleet` успешно выполнила `test`, jlink, jpackage, Inno Setup, SHA-256 и manifest. В реальном сценарии на Windows установленный `v1.0.6` был обновлён новым installer с исходными legacy-аргументами `/CLOSEAPPLICATIONS /RESTARTAPPLICATIONS`: код завершения `0`, HKCU-запись стала `Version=1.0.8`, установленный `AppFleet.exe` автоматически запустился, а журнал подтвердил «Запущена версия 1.0.8». GitHub Actions `v1.0.8` успешно завершился: <https://github.com/Pasha-404/AppFleet/actions/runs/33393460724>. Release публичный, содержит installer, SHA-256 и manifest `1.0.8`; опубликованный checksum совпадает с GitHub digest установщика. `git diff --check` выполнен без замечаний.
