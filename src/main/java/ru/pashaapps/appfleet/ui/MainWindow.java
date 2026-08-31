@@ -204,7 +204,10 @@ public final class MainWindow {
     }
     private Optional<OperationRequest> showOperationConfirmation(OperationPreview preview) {
         Dialog<OperationRequest> dialog = new Dialog<>(); dialog.initOwner(stage); dialog.setTitle("Подтверждение установки"); dialog.setHeaderText(preview.application().displayName() + " — " + preview.targetVersion());
-        Label details = new Label("Текущая версия: " + emptyToDash(preview.currentVersion()) + "\nУстанавливаемая версия: " + preview.targetVersion() + "\nФайл: " + preview.assetName() + " (" + humanSize(preview.assetSize()) + ")\nИсточник: " + preview.sourceUrl() + "\nSHA-256: " + (preview.sha256Available() ? "будет проверен" : "не опубликован") + "\n\n" + preview.releaseDescription() + (preview.thirdPartyInteractiveExeWarning() ? "\n\nВнимание: сторонний EXE будет запущен интерактивно." : "")); details.setWrapText(true);
+        String signatureNotice = preview.packageType() == ru.pashaapps.appfleet.domain.PackageType.EXE
+                ? "\nЦифровая подпись: будет проверена; отсутствие подписи не блокирует установку."
+                : "";
+        Label details = new Label("Текущая версия: " + emptyToDash(preview.currentVersion()) + "\nУстанавливаемая версия: " + preview.targetVersion() + "\nФайл: " + preview.assetName() + " (" + humanSize(preview.assetSize()) + ")\nИсточник: " + preview.sourceUrl() + "\nSHA-256: " + (preview.sha256Available() ? "будет проверен" : "не опубликован") + signatureNotice + "\n\n" + preview.releaseDescription() + (preview.thirdPartyInteractiveExeWarning() ? "\n\nВнимание: сторонний EXE будет запущен интерактивно." : "")); details.setWrapText(true);
         CheckBox close = new CheckBox("Закрыть запущенное приложение автоматически, если оно обнаружено"); close.setWrapText(true);
         VBox content = new VBox(12, details, new Separator(), close); content.setPrefWidth(600); dialog.getDialogPane().setContent(content); ButtonType execute = new ButtonType(preview.currentVersion() == null ? "Установить" : "Обновить", ButtonBar.ButtonData.OK_DONE); dialog.getDialogPane().getButtonTypes().addAll(execute, ButtonType.CANCEL); dialog.setResultConverter(button -> button == execute ? new OperationRequest(true, close.isSelected(), false) : OperationRequest.cancelled()); return dialog.showAndWait().filter(OperationRequest::confirmed);
     }

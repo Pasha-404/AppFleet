@@ -80,3 +80,11 @@
 **Осталось:** локальная реализация завершена. Для передачи исправления пользователю требуется опубликовать patch-релиз `v1.0.2` с новым установщиком.
 
 **Проверки:** `./gradlew.bat test liveIntegrationTest` успешно завершилась (включая новый Windows-тест Authenticode и реальный API/manifest SortIt `v1.5.0`); вручную загружен настоящий `SortIt-Setup-1.5.0-x64.exe` и штатная проверка Windows подтвердила `Status=NotSigned`, `SignerCertificate отсутствует`; `./scripts/build-release.ps1 -Version 1.0.2 -RepositoryUrl https://github.com/Pasha-404/AppFleet` успешно выполнила чистую сборку, тесты, jlink, jpackage, Inno Setup и проверку release metadata; SHA-256 installer совпал с файлом `.sha256`; `git diff --check` без замечаний.
+
+## Этап 10 — предупреждение о неподписанном EXE
+
+**Реализовано:** перед установкой EXE в диалоге подтверждения явно сообщается, что Authenticode будет проверен, а отсутствие подписи не блокирует установку. Если после скачивания подпись отсутствует, AppFleet завершает установку, показывает предупреждение в результате операции и сохраняет его отдельной записью в журнале. Недействительная подпись по-прежнему блокирует запуск.
+
+**Осталось:** исправленная локальная поставка 1.0.3 готова; требуется опубликовать `v1.0.3` и сверить assets GitHub Release.
+
+**Проверки:** `./gradlew.bat test liveIntegrationTest` успешно завершилась; `./scripts/build-release.ps1 -Version 1.0.3 -RepositoryUrl https://github.com/Pasha-404/AppFleet` успешно выполнила тесты, jlink, jpackage, Inno Setup, SHA-256 и проверку release metadata; `git diff --check` без замечаний.

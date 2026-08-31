@@ -168,7 +168,7 @@ public final class AppFleetService implements AutoCloseable {
             journal.write(id.slug(), "Скачивание", "Начата", "Скачивается " + preview.assetName(), null);
             DownloadedFile installer = downloader.download(snapshot.selectedAsset().downloadUri(), operation, snapshot.selectedAsset().name(), cancellation, progress);
             cancellation.throwIfCancelled();
-            verifyDownloadedFile(snapshot, installer, operation, cancellation);
+            AuthenticodeStatus signature = verifyDownloadedFile(snapshot, installer, operation, cancellation);
             journal.write(id.slug(), "Установка", "Начата", "Запускается " + preview.assetName(), null);
             InstallerExit exit;
             if (preview.packageType() == PackageType.ZIP) {
@@ -185,8 +185,14 @@ public final class AppFleetService implements AutoCloseable {
             ApplicationSnapshot updated = check(installed);
             synchronized (this) { snapshots.put(id.normalizedKey(), updated); }
             if (settings.deleteInstallerAfterSuccess()) deleteOperationDirectory(operation);
-            journal.write(id.slug(), "Установка", "Успешно", exit.message(), null);
-            return new OperationResult(true, exit.restartRequired(), exit.message(), updated);
+            String resultMessage = exit.message();
+            if (signature == AuthenticodeStatus.NOT_SIGNED) {
+                String warning = "Установщик не имеет цифровой подписи. AppFleet проверил SHA-256 и продолжил установку.";
+                journal.write(id.slug(), "Проверка файла", "Предупреждение", warning, null);
+                resultMessage += "\n\nПредупреждение: " + warning;
+            }
+            journal.write(id.slug(), "Установка", "Успешно", resultMessage, null);
+            return new OperationResult(true, exit.restartRequired(), resultMessage, updated);
         } catch (OperationCancelledException cancelled) {
             journal.write(id.slug(), "Установка", "Отменена", "Операция отменена пользователем", null);
             return new OperationResult(false, false, "Операция отменена", snapshot);
@@ -195,7 +201,7 @@ public final class AppFleetService implements AutoCloseable {
             return new OperationResult(false, false, "Установка не выполнена: " + failure.getMessage(), snapshot);
         } finally { if (!settings.deleteInstallerAfterSuccess()) { /* temporary installer intentionally retained for user diagnostics */ } }
     }
-    private void verifyDownloadedFile(ApplicationSnapshot snapshot, DownloadedFile downloaded, Path operation, CancellationToken cancellation) throws IOException {
+    private AuthenticodeStatus verifyDownloadedFile(ApplicationSnapshot snapshot, DownloadedFile downloaded, Path operation, CancellationToken cancellation) throws IOException {
         ChecksumVerifier checksums = new ChecksumVerifier();
         String checksumName = snapshot.manifest() == null ? downloaded.path().getFileName() + ".sha256" : snapshot.manifest().installer().sha256AssetName();
         Optional<ReleaseAsset> checksumAsset = checksumName == null ? Optional.empty() : snapshot.release().assets().stream().filter(asset -> asset.name().equals(checksumName)).findFirst();
@@ -210,7 +216,9 @@ public final class AppFleetService implements AutoCloseable {
             AuthenticodeStatus signature = new AuthenticodeVerifier().verify(downloaded.path());
             if (signature == AuthenticodeStatus.INVALID) throw new IOException("Цифровая подпись установщика недействительна");
             journal.write(snapshot.repository().slug(), "Проверка файла", "Успешно", "Authenticode: " + signature, null);
+            return signature;
         }
+        return AuthenticodeStatus.UNAVAILABLE;
     }
     private List<RunningApplication> handleRunningProcesses(ApplicationSnapshot snapshot, OperationRequest request) throws IOException {
         Set<String> names = snapshot.manifest() != null ? new LinkedHashSet<>(snapshot.manifest().processNames()) : snapshot.persisted().processNames();
