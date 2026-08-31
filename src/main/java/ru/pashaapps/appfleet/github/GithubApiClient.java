@@ -11,6 +11,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -20,6 +21,9 @@ import java.util.Comparator;
 /** Official GitHub REST API client; no GitHub HTML is parsed. */
 public final class GithubApiClient {
     public static final URI DEFAULT_BASE_URI = URI.create("https://api.github.com/");
+    private static final int TRANSIENT_REQUEST_ATTEMPTS = 3;
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(20);
+    private static final Duration INITIAL_RETRY_DELAY = Duration.ofMillis(250);
     private final HttpClient client;
     private final ObjectMapper mapper;
     private final URI baseUri;
@@ -64,21 +68,42 @@ public final class GithubApiClient {
 
     private GithubResponse<JsonNode> get(String path, String etag) {
         HttpRequest.Builder request = HttpRequest.newBuilder(baseUri.resolve(path))
-                .GET().header("Accept", "application/vnd.github+json")
+                .GET().timeout(REQUEST_TIMEOUT).header("Accept", "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", "2022-11-28")
                 .header("User-Agent", userAgent);
         if (etag != null && !etag.isBlank()) request.header("If-None-Match", etag);
+        IOException lastNetworkFailure = null;
+        for (int attempt = 1; attempt <= TRANSIENT_REQUEST_ATTEMPTS; attempt++) {
+            try {
+                HttpResponse<String> response = client.send(request.build(), HttpResponse.BodyHandlers.ofString());
+                String responseEtag = response.headers().firstValue("ETag").orElse(null);
+                if (response.statusCode() == 304) return GithubResponse.notModified(responseEtag == null ? etag : responseEtag);
+                if (response.statusCode() >= 500 && attempt < TRANSIENT_REQUEST_ATTEMPTS) {
+                    pauseBeforeRetry(attempt);
+                    continue;
+                }
+                if (response.statusCode() < 200 || response.statusCode() >= 300) throw apiFailure(response);
+                return GithubResponse.success(mapper.readTree(response.body()), responseEtag);
+            } catch (IOException failure) {
+                lastNetworkFailure = failure;
+                if (attempt < TRANSIENT_REQUEST_ATTEMPTS) {
+                    pauseBeforeRetry(attempt);
+                    continue;
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new GithubApiException("Запрос к GitHub был прерван", interrupted);
+            }
+        }
+        throw new GithubApiException("Не удалось подключиться к GitHub после " + TRANSIENT_REQUEST_ATTEMPTS + " попыток", lastNetworkFailure);
+    }
+
+    private static void pauseBeforeRetry(int attempt) {
         try {
-            HttpResponse<String> response = client.send(request.build(), HttpResponse.BodyHandlers.ofString());
-            String responseEtag = response.headers().firstValue("ETag").orElse(null);
-            if (response.statusCode() == 304) return GithubResponse.notModified(responseEtag == null ? etag : responseEtag);
-            if (response.statusCode() < 200 || response.statusCode() >= 300) throw apiFailure(response);
-            return GithubResponse.success(mapper.readTree(response.body()), responseEtag);
-        } catch (IOException failure) {
-            throw new GithubApiException("Не удалось подключиться к GitHub", failure);
+            Thread.sleep(INITIAL_RETRY_DELAY.multipliedBy(1L << (attempt - 1)));
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-            throw new GithubApiException("Запрос к GitHub был прерван", interrupted);
+            throw new GithubApiException("Ожидание повторного запроса к GitHub было прервано", interrupted);
         }
     }
 
@@ -89,6 +114,7 @@ public final class GithubApiClient {
         String message = switch (response.statusCode()) {
             case 404 -> "Репозиторий не существует или не является публичным";
             case 403, 429 -> retryAt == null ? "GitHub временно ограничил запросы" : "GitHub временно ограничил запросы до " + retryAt;
+            case 500, 502, 503, 504 -> "GitHub временно недоступен";
             default -> "GitHub вернул ошибку HTTP " + response.statusCode();
         };
         return new GithubApiException(message, response.statusCode(), retryAt);
