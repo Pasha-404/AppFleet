@@ -27,4 +27,11 @@ class SelfUpdateServiceTest {
         assertTrue(installerScript.contains("CompareText(ParamStr(Index), '/APPFLEETSELFUPDATE') = 0"));
         assertTrue(installerScript.contains("Result := HasCloseApplications and HasLegacyRestart"));
     }
+
+    @Test void installerDeclaresTheStandardOptionalDesktopShortcutTask() throws IOException {
+        String installerScript = Files.readString(Path.of("installer", "AppFleet.iss"));
+
+        assertTrue(installerScript.contains("Name: \"desktopicon\"; Description: \"Создать ярлык на рабочем столе\""));
+        assertTrue(installerScript.contains("Tasks: desktopicon"));
+    }
 }

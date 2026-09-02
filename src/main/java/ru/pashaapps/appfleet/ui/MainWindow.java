@@ -82,10 +82,12 @@ public final class MainWindow {
         Region spacer = new Region(); VBox.setVgrow(spacer, Priority.ALWAYS);
         CheckBox restart = new CheckBox("Повторно запускать приложение после обновления, если оно было запущено"); restart.setWrapText(true); restart.setSelected(service.settings().restartPreviouslyRunningApp());
         CheckBox delete = new CheckBox("Удалять скачанные установщики после успешной установки"); delete.setWrapText(true); delete.setSelected(service.settings().deleteInstallerAfterSuccess());
-        restart.selectedProperty().addListener((observable, wasSelected, selected) -> saveSettings(new UserSettings(selected, delete.isSelected())));
-        delete.selectedProperty().addListener((observable, wasSelected, selected) -> saveSettings(new UserSettings(restart.isSelected(), selected)));
+        CheckBox desktopShortcut = new CheckBox("Создавать ярлык на рабочем столе при первой установке"); desktopShortcut.setWrapText(true); desktopShortcut.setSelected(service.settings().createDesktopShortcutForNewApplications());
+        restart.selectedProperty().addListener((observable, wasSelected, selected) -> saveSettings(new UserSettings(selected, delete.isSelected(), desktopShortcut.isSelected())));
+        delete.selectedProperty().addListener((observable, wasSelected, selected) -> saveSettings(new UserSettings(restart.isSelected(), selected, desktopShortcut.isSelected())));
+        desktopShortcut.selectedProperty().addListener((observable, wasSelected, selected) -> saveSettings(new UserSettings(restart.isSelected(), delete.isSelected(), selected)));
         Label version = new Label("Версия AppFleet: " + build.version()); version.setWrapText(true); version.getStyleClass().add("muted");
-        VBox box = new VBox(8, apps, journal, new Separator(), check, add, statusLine, spacer, new Separator(), restart, delete, new Separator(), version);
+        VBox box = new VBox(8, apps, journal, new Separator(), check, add, statusLine, spacer, new Separator(), restart, delete, desktopShortcut, new Separator(), version);
         box.setPrefWidth(255); box.setMinWidth(220); box.setPadding(new Insets(18, 14, 18, 14)); box.getStyleClass().add("sidebar");
         return box;
     }

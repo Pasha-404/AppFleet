@@ -92,7 +92,8 @@ AppFleet проверяет только stable GitHub Releases публично
     "type": "inno",
     "assetName": "MyProduct-Setup-1.4.0-x64.exe",
     "sha256AssetName": "MyProduct-Setup-1.4.0-x64.exe.sha256",
-    "silentArgs": ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"]
+    "silentArgs": ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"],
+    "desktopShortcutTask": "desktopicon"
   },
   "detection": {
     "registryKey": "HKCU\\Software\\PashaApps\\11111111-2222-4333-8444-555555555555",
@@ -104,7 +105,7 @@ AppFleet проверяет только stable GitHub Releases публично
 }
 ```
 
-`appId` — постоянный UUID приложения: не меняйте его между релизами. `technicalName`, версия manifest, имена installer и SHA-256 asset должны точно совпадать с текущим Release. Для Inno Setup обязательны `installer.type: "inno"`, SHA-256 asset и разрешённые silent-аргументы из примера. Установщик должен записывать `HKCU\\Software\\PashaApps\\<AppId>` со значениями `Version` и `Executable`. AppFleet отвергает manifest с несовпадающими данными и вместо него потребует безопасный ручной выбор файла.
+`appId` — постоянный UUID приложения: не меняйте его между релизами. `technicalName`, версия manifest, имена installer и SHA-256 asset должны точно совпадать с текущим Release. Для Inno Setup обязательны `installer.type: "inno"`, SHA-256 asset и разрешённые silent-аргументы из примера. Необязательное `desktopShortcutTask` содержит имя task из `[Tasks]` Inno Setup, например `desktopicon`: когда пользователь включил настройку AppFleet, она передаётся только при первой установке. При обновлении AppFleet не меняет выбор ярлыков. Для этой возможности сам Inno-скрипт должен содержать `[Tasks] Name: "desktopicon"` и ярлык в `[Icons]` с `Tasks: desktopicon`. Без поля AppFleet не угадывает task и предупредит, что ярлык не создан. Установщик должен записывать `HKCU\\Software\\PashaApps\\<AppId>` со значениями `Version` и `Executable`. AppFleet отвергает manifest с несовпадающими данными и вместо него потребует безопасный ручной выбор файла.
 
 ## Иконка
 

@@ -211,6 +211,18 @@ OutputBaseFilename={#TechnicalName}-Setup-{#AppVersion}-x64
 
 Если приложение не может безопасно завершиться автоматически, установщик должен вернуть понятную ошибку, а не принудительно уничтожать процесс без согласия пользователя.
 
+Для ярлыка на рабочем столе используется необязательная задача Inno Setup с постоянным именем `desktopicon`:
+
+```ini
+[Tasks]
+Name: "desktopicon"; Description: "Создать ярлык на рабочем столе"; GroupDescription: "Ярлыки:"; Flags: unchecked
+
+[Icons]
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#MainExecutable}"; Tasks: desktopicon
+```
+
+При обновлении установщик сохраняет сделанный ранее выбор задачи. AppFleet передаёт отдельный аргумент `/TASKS=desktopicon` только для первой установки и только когда пользователь включил соответствующую настройку.
+
 ## 9. Регистрация для AppFleet
 
 Установщик создаёт ключ:
@@ -262,7 +274,8 @@ HKCU\Software\PashaApps\<AppId>
       "/SUPPRESSMSGBOXES",
       "/NORESTART",
       "/CLOSEAPPLICATIONS"
-    ]
+    ],
+    "desktopShortcutTask": "desktopicon"
   },
   "detection": {
     "registryKey": "HKCU\\Software\\PashaApps\\3d89ce8a-e1d0-4f04-bff0-c8dc12b8e833",
@@ -281,6 +294,7 @@ HKCU\Software\PashaApps\<AppId>
 - `assetName` должен точно соответствовать asset текущего релиза;
 - `version` должен соответствовать версии релиза;
 - `silentArgs` передаются как массив аргументов, а не как shell-строка;
+- `installer.desktopShortcutTask` необязателен и, если задан, содержит имя разрешённой Inno Setup task для ярлыка на рабочем столе; для стандарта используется `desktopicon`;
 - манифест не может задавать произвольную программу для запуска;
 - AppFleet поддерживает только заранее разрешённые значения `installer.type`.
 
@@ -409,4 +423,3 @@ GitHub Actions workflow должен создавать те же артефак
 - поддерживает тихий запуск установщика;
 - не требует ручного удаления предыдущей версии;
 - прошло проверки раздела 16.
-

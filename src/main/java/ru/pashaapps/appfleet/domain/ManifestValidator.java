@@ -15,6 +15,7 @@ import java.util.regex.Pattern;
 /** Strict schema-1 manifest validator. Invalid metadata falls back to asset analysis. */
 public final class ManifestValidator {
     private static final Pattern TECHNICAL_NAME = Pattern.compile("[A-Za-z0-9_-]+$");
+    private static final Pattern INNO_TASK_NAME = Pattern.compile("[A-Za-z0-9_-]+$");
     private static final Set<String> INNO_ARGUMENTS = Set.of("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS");
     private final ObjectMapper mapper;
 
@@ -47,6 +48,11 @@ public final class ManifestValidator {
             if (sha256AssetName != null) require(release.assets().stream().anyMatch(candidate -> candidate.name().equals(sha256AssetName)), "SHA-256 asset отсутствует в текущем релизе");
             List<String> silentArgs = strings(installerNode.path("silentArgs"));
             if (type == PackageType.INNO) require(silentArgs.stream().allMatch(INNO_ARGUMENTS::contains), "Манифест содержит недопустимый аргумент Inno Setup");
+            String desktopShortcutTask = optionalText(installerNode, "desktopShortcutTask");
+            if (desktopShortcutTask != null) {
+                require(type == PackageType.INNO, "desktopShortcutTask поддерживается только для Inno Setup");
+                require(INNO_TASK_NAME.matcher(desktopShortcutTask).matches(), "Некорректное имя Inno Setup task для ярлыка");
+            }
             AppFleetManifest.Detection detection = null;
             if (root.has("detection")) {
                 JsonNode detectionNode = requiredObject(root, "detection");
@@ -56,7 +62,7 @@ public final class ManifestValidator {
             String minimum = optionalText(root, "minimumAppFleetVersion");
             if (minimum != null) require(SemVersion.tryParse(minimum).isPresent(), "minimumAppFleetVersion должна быть SemVer");
             return new AppFleetManifest(1, appId, name, technicalName, SemVersion.parse(version).normalized(), repository.canonicalUrl(), "windows", "x64",
-                    new AppFleetManifest.Installer(type, assetName, sha256AssetName, silentArgs), detection, processNames, minimum);
+                    new AppFleetManifest.Installer(type, assetName, sha256AssetName, silentArgs, desktopShortcutTask), detection, processNames, minimum);
         } catch (IllegalArgumentException failure) {
             throw failure;
         } catch (Exception failure) {
@@ -78,4 +84,3 @@ public final class ManifestValidator {
     private static IllegalArgumentException invalid(String message) { return new IllegalArgumentException("Некорректный appfleet-manifest.json: " + message); }
     private static IllegalArgumentException invalid(String message, Exception cause) { return new IllegalArgumentException("Некорректный appfleet-manifest.json: " + message, cause); }
 }
-

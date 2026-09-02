@@ -257,7 +257,7 @@ tasks.register('generateReleaseFiles') {
         def manifest = [
                 schemaVersion: 1, appId: appfleetAppId.get(), name: 'AppFleet', technicalName: 'AppFleet', version: project.version.toString(),
                 repositoryUrl: appfleetRepositoryUrl.get(), platform: 'windows', architecture: 'x64',
-                installer: [type: 'inno', assetName: installerName, sha256AssetName: "${installerName}.sha256", silentArgs: ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CLOSEAPPLICATIONS']],
+                installer: [type: 'inno', assetName: installerName, sha256AssetName: "${installerName}.sha256", silentArgs: ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CLOSEAPPLICATIONS'], desktopShortcutTask: 'desktopicon'],
                 detection: [registryKey: "HKCU\\Software\\PashaApps\\${appfleetAppId.get()}", versionValue: 'Version', executableValue: 'Executable'],
                 processNames: ['AppFleet.exe'], minimumAppFleetVersion: project.version.toString()
         ]
@@ -274,7 +274,7 @@ tasks.register('verifyReleaseMetadata') {
         def checksum = file("${output}/${installerName}.sha256")
         def manifest = new JsonSlurper().parse(file("${output}/${releaseManifestName}"))
         if (!installer.isFile() || !checksum.isFile() || !checksum.text.matches(/(?s)^[a-f0-9]{64}  \Q${installerName}\E\s*$/)) throw new GradleException('Invalid installer or SHA-256 release asset')
-        if (manifest.version != project.version.toString() || manifest.appId != appfleetAppId.get() || manifest.installer.assetName != installerName || manifest.installer.sha256AssetName != "${installerName}.sha256") throw new GradleException('Release manifest does not match generated installer')
+        if (manifest.version != project.version.toString() || manifest.appId != appfleetAppId.get() || manifest.installer.assetName != installerName || manifest.installer.sha256AssetName != "${installerName}.sha256" || manifest.installer.desktopShortcutTask != 'desktopicon') throw new GradleException('Release manifest does not match generated installer')
     }
 }
 

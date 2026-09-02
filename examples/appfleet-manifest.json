@@ -11,7 +11,8 @@
     "type": "inno",
     "assetName": "MyProduct-Setup-1.4.0-x64.exe",
     "sha256AssetName": "MyProduct-Setup-1.4.0-x64.exe.sha256",
-    "silentArgs": ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"]
+    "silentArgs": ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"],
+    "desktopShortcutTask": "desktopicon"
   },
   "detection": {
     "registryKey": "HKCU\\Software\\PashaApps\\11111111-2222-4333-8444-555555555555",

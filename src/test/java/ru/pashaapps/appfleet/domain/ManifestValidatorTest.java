@@ -15,6 +15,18 @@ class ManifestValidatorTest {
         AppFleetManifest manifest = new ManifestValidator(AppFleetObjectMapper.create()).validate(resource("fixtures/sortit-manifest-v1.5.0.json"), RepositoryId.fromGithubUrl("https://github.com/Pasha-404/sortit"), release);
         assertEquals("SortIt-Setup-1.5.0-x64.exe", manifest.installer().assetName());
         assertEquals(PackageType.INNO, manifest.installer().type());
+        assertNull(manifest.installer().desktopShortcutTask());
+    }
+    @Test void acceptsADeclaredInnoDesktopShortcutTask() throws IOException {
+        String withShortcut = new String(resource("fixtures/sortit-manifest-v1.5.0.json"), StandardCharsets.UTF_8)
+                .replace("\"silentArgs\": [\"/VERYSILENT\", \"/SUPPRESSMSGBOXES\", \"/NORESTART\", \"/CLOSEAPPLICATIONS\"]", "\"silentArgs\": [\"/VERYSILENT\", \"/SUPPRESSMSGBOXES\", \"/NORESTART\", \"/CLOSEAPPLICATIONS\"], \"desktopShortcutTask\": \"desktopicon\"");
+        AppFleetManifest manifest = new ManifestValidator(AppFleetObjectMapper.create()).validate(withShortcut.getBytes(StandardCharsets.UTF_8), RepositoryId.fromGithubUrl("https://github.com/Pasha-404/sortit"), fixtureRelease());
+        assertEquals("desktopicon", manifest.installer().desktopShortcutTask());
+    }
+    @Test void rejectsAnUnsafeDesktopShortcutTaskName() throws IOException {
+        String unsafe = new String(resource("fixtures/sortit-manifest-v1.5.0.json"), StandardCharsets.UTF_8)
+                .replace("\"silentArgs\": [\"/VERYSILENT\", \"/SUPPRESSMSGBOXES\", \"/NORESTART\", \"/CLOSEAPPLICATIONS\"]", "\"silentArgs\": [\"/VERYSILENT\", \"/SUPPRESSMSGBOXES\", \"/NORESTART\", \"/CLOSEAPPLICATIONS\"], \"desktopShortcutTask\": \"desktop icon;evil\"");
+        assertThrows(IllegalArgumentException.class, () -> new ManifestValidator(AppFleetObjectMapper.create()).validate(unsafe.getBytes(StandardCharsets.UTF_8), RepositoryId.fromGithubUrl("https://github.com/Pasha-404/sortit"), fixtureRelease()));
     }
     @Test void rejectsAManifestThatReferencesAnUnknownAsset() throws IOException {
         String invalid = new String(resource("fixtures/sortit-manifest-v1.5.0.json"), StandardCharsets.UTF_8).replace("SortIt-Setup-1.5.0-x64.exe\"", "Unknown.exe\"");

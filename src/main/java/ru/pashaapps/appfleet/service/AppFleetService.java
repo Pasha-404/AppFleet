@@ -196,6 +196,9 @@ public final class AppFleetService implements AutoCloseable {
         if (!request.confirmed()) { journal.write(id.slug(), "Установка", "Отменена", "Пользователь не подтвердил операцию", null); return new OperationResult(false, false, "Операция отменена", requireSnapshot(id)); }
         ApplicationSnapshot snapshot = requireSnapshot(id);
         OperationPreview preview = preview(id);
+        boolean firstInstallation = snapshot.status() == AppStatus.NOT_INSTALLED;
+        boolean desktopShortcutRequested = firstInstallation && settings().createDesktopShortcutForNewApplications();
+        String desktopShortcutTask = desktopShortcutTask(snapshot, preview.packageType());
         Path operation = paths.temporaryRoot().resolve("operation-" + UUID.randomUUID());
         try {
             List<RunningApplication> previouslyRunning = handleRunningProcesses(snapshot, request);
@@ -210,7 +213,8 @@ public final class AppFleetService implements AutoCloseable {
                 new ManagedZipInstaller(paths.programDirectory().getParent().getParent().resolve("AppFleetManaged")).install(installer.path(), id, cancellation);
                 exit = InstallerExit.forGeneric(0);
             } else {
-                List<String> arguments = snapshot.manifest() == null ? List.of() : snapshot.manifest().installer().silentArgs();
+                List<String> baseArguments = snapshot.manifest() == null ? List.of() : snapshot.manifest().installer().silentArgs();
+                List<String> arguments = withDesktopShortcutTask(baseArguments, firstInstallation, desktopShortcutRequested, desktopShortcutTask);
                 journal.write(id.slug(), "Запуск установщика", "Начата", "Запускается " + preview.assetName() + (arguments.isEmpty() ? "" : " с параметрами " + String.join(" ", arguments)), null);
                 exit = new ExternalInstallerRunner().run(installer.path(), preview.packageType(), arguments);
                 journal.write(id.slug(), "Запуск установщика", "Завершён", "Установщик завершил основной процесс с кодом " + exit.code(), null);
@@ -231,6 +235,11 @@ public final class AppFleetService implements AutoCloseable {
                 journal.write(id.slug(), "Проверка файла", "Предупреждение", warning, null);
                 resultMessage += "\n\nПредупреждение: " + warning;
             }
+            if (desktopShortcutRequested && desktopShortcutTask == null) {
+                String warning = "Ярлык на рабочем столе не создан: manifest приложения не объявляет поддерживаемую Inno Setup task.";
+                journal.write(id.slug(), "Ярлык на рабочем столе", "Предупреждение", warning, null);
+                resultMessage += "\n\nПредупреждение: " + warning;
+            }
             journal.write(id.slug(), "Установка", "Успешно", resultMessage, null);
             return new OperationResult(true, exit.restartRequired(), resultMessage, updated);
         } catch (OperationCancelledException cancelled) {
@@ -240,6 +249,18 @@ public final class AppFleetService implements AutoCloseable {
             journal.write(id.slug(), "Установка", "Ошибка", "Установка не выполнена: " + failure.getMessage(), failure);
             return new OperationResult(false, false, "Установка не выполнена: " + failure.getMessage(), snapshot);
         } finally { if (!settings.deleteInstallerAfterSuccess()) { /* temporary installer intentionally retained for user diagnostics */ } }
+    }
+
+    static List<String> withDesktopShortcutTask(List<String> baseArguments, boolean firstInstallation, boolean requested, String taskName) {
+        if (!firstInstallation || !requested || taskName == null || taskName.isBlank()) return List.copyOf(baseArguments);
+        List<String> arguments = new ArrayList<>(baseArguments);
+        arguments.add("/TASKS=" + taskName);
+        return List.copyOf(arguments);
+    }
+
+    private static String desktopShortcutTask(ApplicationSnapshot snapshot, PackageType packageType) {
+        if (packageType != PackageType.INNO || snapshot.manifest() == null) return null;
+        return snapshot.manifest().installer().desktopShortcutTask();
     }
     private AuthenticodeStatus verifyDownloadedFile(ApplicationSnapshot snapshot, DownloadedFile downloaded, Path operation, CancellationToken cancellation) throws IOException {
         ChecksumVerifier checksums = new ChecksumVerifier();
