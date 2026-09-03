@@ -115,7 +115,7 @@ AppFleet проверяет только stable GitHub Releases публично
 .\scripts\generate-icon.ps1
 ```
 
-Скрипт создаёт размеры 16, 24, 32, 48, 64, 128 и 256 px. Сборка использует ICO для app-image и Inno Setup.
+Скрипт создаёт ICO с размерами 16, 24, 32, 48, 64, 128 и 256 px, а также ресурс [appfleet-window-icon.png](src/main/resources/appfleet-window-icon.png) размером 256 px. Сборка использует ICO для app-image и Inno Setup, а JavaFX — PNG для значка запущенного окна.
 
 ## Данные и установка
 

@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$OutputPath = (Join-Path $PSScriptRoot '..\assets\AppFleet.ico'),
+    [string]$WindowIconPath = (Join-Path $PSScriptRoot '..\src\main\resources\appfleet-window-icon.png'),
     [string]$PreviewPath = (Join-Path $PSScriptRoot '..\build\AppFleet-icon-preview.png')
 )
 
@@ -92,4 +93,7 @@ $writer.Dispose(); $stream.Dispose()
 $previewFile = [System.IO.FileInfo]$PreviewPath
 $previewFile.Directory.Create()
 [System.IO.File]::WriteAllBytes($previewFile.FullName, $images[-1])
-Write-Output "Generated $($outputFile.FullName) with $($images.Count) icon resolutions."
+$windowIconFile = [System.IO.FileInfo]$WindowIconPath
+$windowIconFile.Directory.Create()
+[System.IO.File]::WriteAllBytes($windowIconFile.FullName, $images[-1])
+Write-Output "Generated $($outputFile.FullName) with $($images.Count) icon resolutions and $($windowIconFile.FullName)."

@@ -25,6 +25,7 @@ import java.util.Optional;
 /** Reads the Windows Shell icon of a detected executable and falls back to a stable monogram. */
 final class InstalledApplicationIconResolver {
     private static final int ICON_SIZE = 48;
+    private static final int SHELL_ICON_SOURCE_SIZE = 64;
     private final Map<Path, Optional<Image>> cachedIcons = new HashMap<>();
 
     Node iconFor(ApplicationSnapshot snapshot) {
@@ -47,7 +48,8 @@ final class InstalledApplicationIconResolver {
     static Optional<Image> loadSystemIcon(Path executable) {
         if (executable == null || !Files.isRegularFile(executable)) return Optional.empty();
         try {
-            Icon icon = FileSystemView.getFileSystemView().getSystemIcon(executable.toFile());
+            Icon icon = FileSystemView.getFileSystemView().getSystemIcon(
+                    executable.toFile(), SHELL_ICON_SOURCE_SIZE, SHELL_ICON_SOURCE_SIZE);
             if (icon == null || icon.getIconWidth() <= 0 || icon.getIconHeight() <= 0) return Optional.empty();
             BufferedImage buffered = new BufferedImage(icon.getIconWidth(), icon.getIconHeight(), BufferedImage.TYPE_INT_ARGB);
             Graphics2D graphics = buffered.createGraphics();
@@ -69,6 +71,10 @@ final class InstalledApplicationIconResolver {
         String[] words = name.trim().split("\\s+");
         if (words.length == 1) return words[0].substring(0, 1).toUpperCase();
         return (words[0].substring(0, 1) + words[1].substring(0, 1)).toUpperCase();
+    }
+
+    static int shellIconSourceSize() {
+        return SHELL_ICON_SOURCE_SIZE;
     }
 
     private static Path executable(ApplicationSnapshot snapshot) {

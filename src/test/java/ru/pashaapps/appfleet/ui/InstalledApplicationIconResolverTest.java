@@ -17,4 +17,8 @@ class InstalledApplicationIconResolverTest {
     @Test void doesNotAskTheWindowsShellForMissingExecutable() {
         assertTrue(InstalledApplicationIconResolver.loadSystemIcon(Path.of("missing-appfleet-test.exe")).isEmpty());
     }
+
+    @Test void requestsALargerShellSourceThanItsRenderedSize() {
+        assertTrue(InstalledApplicationIconResolver.shellIconSourceSize() > 48);
+    }
 }
