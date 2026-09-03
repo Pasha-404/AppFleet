@@ -1,5 +1,7 @@
 # Стандарт установщиков Windows для Java-приложений
 
+> Этот документ — полный обязательный стандарт для **новых** Java-приложений, совместимых с AppFleet. Для уже выпущенного приложения, которому нужно добавить только выбор ярлыка рабочего стола без смены остальных механизмов, используйте отдельную [инструкцию миграции](Desktop_Shortcut_Migration.md).
+
 ## 1. Назначение
 
 Документ задаёт единые правила сборки, установки и обновления наших Java-приложений под Windows 10/11 x64. Соблюдение стандарта позволяет AppFleet надёжно устанавливать приложение с нуля, определять установленную версию, закрывать приложение и обновлять его без ручного удаления предыдущей версии.
@@ -16,6 +18,7 @@
 - Пользовательские настройки и документы не хранятся внутри каталога программы.
 - Все релизы публикуются через GitHub Releases по единой схеме.
 - Каждый проект публикует машиночитаемый `appfleet-manifest.json`.
+- Каждый новый проект поддерживает необязательный ярлык рабочего стола через Inno Setup task с именем `desktopicon`.
 
 MSI допускается только как отдельный дополнительный корпоративный дистрибутив, если для конкретного проекта действительно потребуется развёртывание административными средствами Windows. Он не должен заменять стандартный EXE.
 
@@ -172,15 +175,38 @@ icons\
 
 ## 8. Inno Setup
 
-Каждый проект использует общий шаблон, в который передаются параметры приложения. Минимальные настройки:
+Каждый новый проект использует Inno Setup 6 и следующий эталонный сценарий. Он рассчитан на уже собранный `jpackage` app-image, установку для текущего пользователя и обновление поверх предыдущей версии. Значения, которые передаёт сборка, перечислены в первых пяти проверках `#ifndef`; остальные три `#define` меняются один раз при создании проекта.
+
+`AppId` — строка UUID без фигурных скобок, например `3d89ce8a-e1d0-4f04-bff0-c8dc12b8e833`. В сборку каждой версии передаётся **тот же** `AppId`. Не используйте `AppId={{...}` и не добавляйте директиву `UninstallDisplayVersion`: в Inno Setup отображаемую версию Windows создаёт `AppVersion`.
 
 ```ini
+#ifndef AppVersion
+  #error AppVersion must be supplied by the build
+#endif
+#ifndef AppId
+  #error AppId must be supplied by the build
+#endif
+#ifndef RepositoryUrl
+  #error RepositoryUrl must be supplied by the build
+#endif
+#ifndef AppImageDir
+  #error AppImageDir must be supplied by the build
+#endif
+#ifndef OutputDir
+  #error OutputDir must be supplied by the build
+#endif
+
+; Эти три значения постоянны для проекта.
+#define AppName "My Product"
+#define TechnicalName "MyProduct"
+#define MainExecutable "MyProduct.exe"
+
 [Setup]
-AppId={{STABLE-APP-UUID}
+AppId={#AppId}
 AppName={#AppName}
 AppVersion={#AppVersion}
 UninstallDisplayName={#AppName}
-UninstallDisplayVersion={#AppVersion}
+AppPublisher=PashaApps
 DefaultDirName={localappdata}\Programs\PashaApps\{#TechnicalName}
 DefaultGroupName={#AppName}
 PrivilegesRequired=lowest
@@ -192,37 +218,93 @@ CloseApplications=yes
 RestartApplications=no
 Compression=lzma2
 SolidCompression=yes
+OutputDir={#OutputDir}
 OutputBaseFilename={#TechnicalName}-Setup-{#AppVersion}-x64
-```
+DisableProgramGroupPage=yes
+WizardStyle=modern
+SetupIconFile=..\assets\MyProduct.ico
+UninstallDisplayIcon={app}\{#MainExecutable}
 
-Точный синтаксис экранирования UUID должен проверяться компилятором Inno Setup. В итоговом шаблоне `AppId` обязан оставаться одинаковым для всех версий приложения.
-
-Минимальные режимы командной строки:
-
-```text
-Обычная установка:
-<Installer>.exe
-
-Тихая установка AppFleet:
-<Installer>.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS
-
-Тихая установка с перезапуском:
-<Installer>.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS
-```
-
-Если приложение не может безопасно завершиться автоматически, установщик должен вернуть понятную ошибку, а не принудительно уничтожать процесс без согласия пользователя.
-
-Для ярлыка на рабочем столе используется необязательная задача Inno Setup с постоянным именем `desktopicon`. `UsePreviousTasks=yes` обязателен: он сохраняет ранее сделанный выбор при обновлении.
-
-```ini
 [Tasks]
 Name: "desktopicon"; Description: "Создать ярлык на рабочем столе"; GroupDescription: "Ярлыки:"; Flags: unchecked
 
+[InstallDelete]
+; При обновлении удаляются только известные заменяемые элементы app-image.
+Type: files; Name: "{app}\{#MainExecutable}"
+Type: filesandordirs; Name: "{app}\app"
+Type: filesandordirs; Name: "{app}\runtime"
+Type: filesandordirs; Name: "{app}\icons"
+
+[Files]
+; App-image должен быть полностью подготовлен до запуска Inno Setup.
+Source: "{#AppImageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
 [Icons]
+Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#MainExecutable}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#MainExecutable}"; Tasks: desktopicon
+
+[Registry]
+Root: HKCU; Subkey: "Software\PashaApps\{#AppId}"; ValueType: string; ValueName: "SchemaVersion"; ValueData: "1"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\PashaApps\{#AppId}"; ValueType: string; ValueName: "AppId"; ValueData: "{#AppId}"
+Root: HKCU; Subkey: "Software\PashaApps\{#AppId}"; ValueType: string; ValueName: "Name"; ValueData: "{#AppName}"
+Root: HKCU; Subkey: "Software\PashaApps\{#AppId}"; ValueType: string; ValueName: "TechnicalName"; ValueData: "{#TechnicalName}"
+Root: HKCU; Subkey: "Software\PashaApps\{#AppId}"; ValueType: string; ValueName: "Version"; ValueData: "{#AppVersion}"
+Root: HKCU; Subkey: "Software\PashaApps\{#AppId}"; ValueType: string; ValueName: "InstallLocation"; ValueData: "{app}"
+Root: HKCU; Subkey: "Software\PashaApps\{#AppId}"; ValueType: string; ValueName: "Executable"; ValueData: "{app}\{#MainExecutable}"
+Root: HKCU; Subkey: "Software\PashaApps\{#AppId}"; ValueType: string; ValueName: "ProcessName"; ValueData: "{#MainExecutable}"
+Root: HKCU; Subkey: "Software\PashaApps\{#AppId}"; ValueType: string; ValueName: "RepositoryUrl"; ValueData: "{#RepositoryUrl}"
+Root: HKCU; Subkey: "Software\PashaApps\{#AppId}"; ValueType: string; ValueName: "InstallerType"; ValueData: "inno"
+Root: HKCU; Subkey: "Software\PashaApps\{#AppId}"; ValueType: string; ValueName: "InstalledBy"; ValueData: "installer"
+Root: HKCU; Subkey: "Software\PashaApps\{#AppId}"; ValueType: string; ValueName: "Publisher"; ValueData: "PashaApps"
+
+[Run]
+; При тихой установке приложение не запускается.
+Filename: "{app}\{#MainExecutable}"; Description: "Запустить {#AppName}"; Flags: nowait postinstall skipifsilent
+
+[UninstallDelete]
+; Не удаляйте данные из %APPDATA% и кэш/логи из %LOCALAPPDATA%.
+Type: files; Name: "{app}\{#MainExecutable}"
+Type: filesandordirs; Name: "{app}\app"
+Type: filesandordirs; Name: "{app}\runtime"
+Type: filesandordirs; Name: "{app}\icons"
+Type: dirifempty; Name: "{app}"
 ```
 
-При обновлении installer сохраняет сделанный ранее выбор задачи. AppFleet передаёт отдельный аргумент `/TASKS=desktopicon` только для первой установки и только когда пользователь включил соответствующую настройку. Аргумент не должен входить в `silentArgs` manifest. Полная пошаговая инструкция для готовых приложений находится в [Desktop_Shortcut_Migration.md](Desktop_Shortcut_Migration.md).
+Замените в сценарии только `AppName`, `TechnicalName`, `MainExecutable` и путь `SetupIconFile` на реальные значения проекта. `AppImageDir` обязан указывать на корень app-image, а `OutputDir` — на каталог сборочных артефактов, не на каталог GitHub Release вручную. Внешние приложения не добавляют в этот сценарий код самообновления AppFleet: это специальный механизм только установщика самого AppFleet.
+
+`ArchitecturesAllowed=x64compatible` и `ArchitecturesInstallIn64BitMode=x64compatible` обязательны: они ограничивают запуск x64-совместимой Windows и включают 64-битный режим установки, в том числе на Windows 11 on Arm через эмуляцию x64. `UsePreviousAppDir=yes` сохраняет каталог, а `UsePreviousTasks=yes` — выбранные задачи при обновлении.
+
+### 8.1. Тихий запуск и ярлык рабочего стола
+
+Базовые аргументы, которые новый проект записывает в `installer.silentArgs` manifest:
+
+```text
+/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS
+```
+
+`/VERYSILENT` скрывает мастер установки, а `/NORESTART` запрещает установщику перезагрузить Windows. При невозможности безопасно закрыть процесс установщик завершает операцию с ошибкой; он не должен принудительно уничтожать процесс приложения.
+
+Задача `desktopicon` и условный `{autodesktop}`-ярлык из эталонного сценария обязательны для нового проекта. Обычный интерактивный installer оставляет задачу невыбранной (`Flags: unchecked`). При **первой** тихой установке AppFleet по выбору пользователя дополняет аргументы отдельным `/TASKS=desktopicon`. При обновлении AppFleet этот аргумент не передаёт: Inno Setup сохраняет прежний выбор благодаря `UsePreviousTasks=yes`.
+
+Никогда не добавляйте `/TASKS=desktopicon` в `silentArgs` manifest: тогда ярлык навязывался бы при каждом обновлении. Не создавайте и не удаляйте файл `.lnk` из приложения или AppFleet — это обязанность Inno Setup.
+
+Для уже выпущенного проекта с существующим сценарием используйте [Desktop_Shortcut_Migration.md](Desktop_Shortcut_Migration.md), а не меняйте прежние Release задним числом.
+
+### 8.2. Вызов компилятора из сборки
+
+Сборочная задача запускает `ISCC.exe` без ручного ввода значений в интерфейсе Inno Setup. Эквивалентный вызов выглядит так:
+
+```powershell
+& ISCC.exe `
+  '/DAppVersion=1.4.0' `
+  '/DAppId=3d89ce8a-e1d0-4f04-bff0-c8dc12b8e833' `
+  '/DRepositoryUrl=https://github.com/OWNER/MyProduct' `
+  '/DAppImageDir=C:\absolute\path\to\app-image\MyProduct' `
+  '/DOutputDir=C:\absolute\path\to\build\installer' `
+  'installer\MyProduct.iss'
+```
+
+В реальной Gradle/Maven-задаче это должны быть отдельные аргументы процесса, а не одна shell-строка. `AppVersion`, `AppId` и `RepositoryUrl` одновременно передаются в jpackage, Inno Setup, registry и генератор manifest из единого конфигурационного источника. После компиляции сборка проверяет, что существует ровно файл `<TechnicalName>-Setup-<version>-x64.exe`.
 
 ## 9. Регистрация для AppFleet
 
@@ -246,15 +328,15 @@ HKCU\Software\PashaApps\<AppId>
 | `ProcessName` | Имя процесса, например `LocalDrop.exe` |
 | `RepositoryUrl` | Каноническая ссылка GitHub |
 | `InstallerType` | `inno` |
-| `InstalledBy` | `installer` или `appfleet` |
+| `InstalledBy` | `installer` — значение, записываемое стандартным EXE, в том числе при запуске из AppFleet |
 
 Дополнительно допускаются `Publisher`, `UninstallString` и `QuietUninstallString`.
 
-Значения обновляются только после успешного копирования программных файлов. При обычном удалении приложения ключ удаляется. Пользовательские настройки в `%APPDATA%` по умолчанию не удаляются; их удаление возможно только через отдельный явно сформулированный выбор пользователя.
+Стандартный `[Registry]` из раздела 8 создаёт все эти значения. Они обновляются только после успешного копирования программных файлов. При обычном удалении приложения ключ удаляется. Пользовательские настройки в `%APPDATA%` по умолчанию не удаляются; их удаление возможно только через отдельный явно сформулированный выбор пользователя.
 
 ## 10. Манифест AppFleet
 
-Каждый GitHub Release содержит `appfleet-manifest.json` в UTF-8. Пример схемы версии 1:
+Каждый GitHub Release содержит `appfleet-manifest.json` в UTF-8 без BOM. Для новых проектов используется schema version `1`; повышать её ради ярлыка рабочего стола не нужно. Полный копируемый файл также находится в [examples/appfleet-manifest.json](examples/appfleet-manifest.json). Пример:
 
 ```json
 {
@@ -295,13 +377,16 @@ HKCU\Software\PashaApps\<AppId>
 - `assetName` должен точно соответствовать asset текущего релиза;
 - `version` должен соответствовать версии релиза;
 - `silentArgs` передаются как массив аргументов, а не как shell-строка;
-- `installer.desktopShortcutTask` необязателен и, если задан, содержит имя разрешённой Inno Setup task для ярлыка на рабочем столе; для стандарта используется `desktopicon`;
+- новые проекты обязательно задают `installer.desktopShortcutTask: "desktopicon"`; отсутствие поля допускается только для старого Release, ещё не прошедшего миграцию;
+- `desktopShortcutTask` — только имя разрешённой Inno Setup task, без пробелов, слешей и аргументов; стандартное и единственно допустимое имя для новых проектов — `desktopicon`;
+- `/TASKS=desktopicon` не входит в `silentArgs`: AppFleet добавляет его самостоятельно и только при первой установке с включённой настройкой ярлыка;
+- поле остаётся обратно совместимым со schema 1: старые версии AppFleet могут проигнорировать его, а AppFleet 1.0.9 и новее используют его безопасно;
 - манифест не может задавать произвольную программу для запуска;
 - AppFleet поддерживает только заранее разрешённые значения `installer.type`.
 
 ## 11. GitHub Release
 
-Каждый stable-релиз содержит ровно один основной Windows x64 EXE-установщик и служебные файлы:
+Каждый stable-релиз содержит ровно один основной Windows x64 EXE-установщик и обязательные служебные файлы:
 
 ```text
 <TechnicalName>-Setup-<version>-x64.exe
@@ -309,7 +394,7 @@ HKCU\Software\PashaApps\<AppId>
 appfleet-manifest.json
 ```
 
-Дополнительные файлы допускаются, но не должны иметь имена, которые можно спутать с основным Windows x64 установщиком.
+Дополнительные файлы допускаются, но не должны иметь имена, которые можно спутать с основным Windows x64 установщиком. Исходный ZIP, отладочный ZIP, второй EXE и установщик другой архитектуры не заменяют обязательный EXE.
 
 Формат файла SHA-256:
 
@@ -317,7 +402,7 @@ appfleet-manifest.json
 <64 hexadecimal characters>  <TechnicalName>-Setup-<version>-x64.exe
 ```
 
-Описание GitHub Release должно кратко перечислять пользовательские изменения. Draft и prerelease не считаются обычным стабильным обновлением.
+Tag имеет вид `v<version>`, а `version` в manifest — тот же номер без `v`. Описание GitHub Release кратко перечисляет пользовательские изменения и указывает, если EXE пока не подписан Authenticode. Draft и prerelease не считаются обычным стабильным обновлением.
 
 ## 12. Миграция существующих EXE и MSI
 
@@ -366,49 +451,56 @@ appfleet-manifest.json
 
 ## 14. Автоматизация сборки
 
-В каждом проекте должна быть одна документированная команда формирования релиза, например:
+В каждом проекте должна быть одна документированная команда формирования release-кандидата, например:
 
 ```powershell
 .\gradlew.bat clean test buildWindowsInstaller -Pversion=1.4.0
 ```
 
-Команда должна:
+Название Gradle/Maven-задачи может отличаться, но последовательность и результат обязательны. Команда должна:
 
 1. Проверить формат версии.
 2. Запустить тесты.
-3. Собрать JAR и app-image.
-4. Собрать Inno Setup EXE.
-5. Вычислить SHA-256.
-6. Сформировать `appfleet-manifest.json`.
-7. Проверить соответствие версий и имён файлов.
-8. Поместить готовые файлы в один каталог `dist/release/<version>`.
+3. Собрать JAR, минимальную Runtime через `jlink` и app-image через `jpackage`.
+4. Скомпилировать Inno Setup EXE из эталонного сценария раздела 8.
+5. Подписать EXE Authenticode, если сертификат уже доступен.
+6. Вычислить SHA-256 только для окончательного EXE.
+7. Сформировать `appfleet-manifest.json` из тех же параметров версии, имени и `AppId`.
+8. Проверить соответствие версий и имён файлов, SHA-256 и обязательных полей manifest.
+9. Поместить готовые файлы в один каталог `dist/release/<version>`.
 
 Формирование установщика не должно зависеть от ручного переименования файлов или ручной правки манифеста.
 
-GitHub Actions workflow должен создавать те же артефакты. Публикация Release может оставаться отдельным подтверждаемым шагом.
+GitHub Actions workflow должен создавать те же артефакты и запускать ту же проверку метаданных. Публикация GitHub Release может оставаться отдельным подтверждаемым шагом, но не должна пересобирать или переименовывать файл вручную.
 
 ## 15. Цифровая подпись
 
 - При наличии сертификата EXE подписывается Authenticode после сборки и до вычисления SHA-256.
 - SHA-256 вычисляется только для окончательно подписанного файла.
 - Отметка времени при подписи обязательна.
-- До появления сертификата допускаются неподписанные наши установщики, но AppFleet всё равно обязан проверять SHA-256 из релиза.
+- До появления сертификата допускаются неподписанные наши установщики: AppFleet предупреждает об отсутствии подписи, но при совпадении SHA-256 продолжает установку.
+- Недействительная, повреждённая или не прошедшая проверку Authenticode подпись — ошибка: такой EXE AppFleet не запускает.
+- Нельзя выдавать самоподписанный тестовый сертификат за рабочую подпись или менять EXE после публикации его checksum.
 
 ## 16. Проверки перед выпуском
 
 Для каждого релиза проверить:
 
 1. Установку на чистый профиль Windows без Java.
-2. Запуск приложения из меню «Пуск».
-3. Обновление минимум с предыдущей версии.
-4. Сохранение настроек после обновления.
-5. Отсутствие второй записи в списке установленных программ.
-6. Тихую установку через параметры AppFleet.
-7. Корректный код завершения установщика.
-8. Соответствие версии в приложении, реестре, установщике, имени файла, манифесте и GitHub tag.
-9. Проверку SHA-256.
-10. Удаление приложения без удаления пользовательских документов.
-11. Для первого стандартного релиза — миграцию с каждого реально использовавшегося старого установщика.
+2. Запуск приложения из меню «Пуск» и корректность иконки приложения.
+3. Первую интерактивную установку: задача «Создать ярлык на рабочем столе» показана и не выбрана по умолчанию.
+4. Первую тихую установку с базовыми `silentArgs`: ярлык не создаётся и приложение не запускается.
+5. Первую тихую установку с дополнительным `/TASKS=desktopicon`: ярлык создаётся и запускает главный EXE.
+6. Обновление минимум с предыдущей версии с ранее созданным ярлыком: ярлык остаётся.
+7. Обновление без ранее созданного ярлыка: новый ярлык не появляется.
+8. Сохранение настроек и пользовательских данных после обновления.
+9. Отсутствие второй записи в списке установленных программ и сохранение выбранного каталога установки.
+10. Наличие точных значений HKCU для AppFleet: версия, путь EXE, имя процесса, URL репозитория и `InstallerType=inno`.
+11. Корректный код завершения установщика и понятная ошибка, если запущенное приложение не удаётся закрыть.
+12. Соответствие версии в приложении, реестре, установщике, имени файла, manifest и GitHub tag.
+13. Проверку SHA-256 окончательного EXE; при наличии подписи — её валидность.
+14. Удаление приложения: ярлык и ключ AppFleet удаляются, пользовательские документы, настройки, кэш и логи без явного выбора не удаляются.
+15. Для первого стандартного релиза существующего продукта — миграцию с каждого реально использовавшегося старого установщика.
 
 ## 17. Критерии соответствия стандарту
 
@@ -419,8 +511,9 @@ GitHub Actions workflow должен создавать те же артефак
 - содержит встроенную Java Runtime;
 - хранит данные отдельно от программных файлов;
 - корректно обновляется поверх предыдущей версии;
+- сохраняет каталог установки и выбор задачи `desktopicon` при обновлении;
 - записывает обязательные значения реестра;
-- публикует установщик, SHA-256 и валидный `appfleet-manifest.json`;
-- поддерживает тихий запуск установщика;
+- публикует установщик, SHA-256 и валидный `appfleet-manifest.json` schema 1 с `desktopShortcutTask: "desktopicon"`;
+- поддерживает тихий запуск с базовыми `silentArgs` и отдельной task только для первой установки;
 - не требует ручного удаления предыдущей версии;
 - прошло проверки раздела 16.
