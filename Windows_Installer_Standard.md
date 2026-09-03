@@ -187,6 +187,7 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UsePreviousAppDir=yes
+UsePreviousTasks=yes
 CloseApplications=yes
 RestartApplications=no
 Compression=lzma2
@@ -211,7 +212,7 @@ OutputBaseFilename={#TechnicalName}-Setup-{#AppVersion}-x64
 
 Если приложение не может безопасно завершиться автоматически, установщик должен вернуть понятную ошибку, а не принудительно уничтожать процесс без согласия пользователя.
 
-Для ярлыка на рабочем столе используется необязательная задача Inno Setup с постоянным именем `desktopicon`:
+Для ярлыка на рабочем столе используется необязательная задача Inno Setup с постоянным именем `desktopicon`. `UsePreviousTasks=yes` обязателен: он сохраняет ранее сделанный выбор при обновлении.
 
 ```ini
 [Tasks]
@@ -221,7 +222,7 @@ Name: "desktopicon"; Description: "Создать ярлык на рабочем
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#MainExecutable}"; Tasks: desktopicon
 ```
 
-При обновлении установщик сохраняет сделанный ранее выбор задачи. AppFleet передаёт отдельный аргумент `/TASKS=desktopicon` только для первой установки и только когда пользователь включил соответствующую настройку.
+При обновлении installer сохраняет сделанный ранее выбор задачи. AppFleet передаёт отдельный аргумент `/TASKS=desktopicon` только для первой установки и только когда пользователь включил соответствующую настройку. Аргумент не должен входить в `silentArgs` manifest. Полная пошаговая инструкция для готовых приложений находится в [Desktop_Shortcut_Migration.md](Desktop_Shortcut_Migration.md).
 
 ## 9. Регистрация для AppFleet
 
