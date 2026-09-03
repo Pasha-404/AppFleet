@@ -18,6 +18,7 @@ ext {
     jacksonVersion = '2.18.4'
     slf4jVersion = '2.0.17'
     logbackVersion = '1.5.18'
+    jnaVersion = '5.19.1'
     junitVersion = '5.12.2'
 }
 
@@ -45,6 +46,8 @@ dependencies {
     implementation "com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}"
     implementation "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:${jacksonVersion}"
     implementation "org.slf4j:slf4j-api:${slf4jVersion}"
+    implementation "net.java.dev.jna:jna:${jnaVersion}"
+    implementation "net.java.dev.jna:jna-platform:${jnaVersion}"
     runtimeOnly "ch.qos.logback:logback-classic:${logbackVersion}"
 
     testImplementation "org.junit.jupiter:junit-jupiter:${junitVersion}"

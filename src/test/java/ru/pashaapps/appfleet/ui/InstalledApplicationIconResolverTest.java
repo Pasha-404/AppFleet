@@ -2,6 +2,7 @@ package ru.pashaapps.appfleet.ui;
 
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -18,7 +19,11 @@ class InstalledApplicationIconResolverTest {
         assertTrue(InstalledApplicationIconResolver.loadSystemIcon(Path.of("missing-appfleet-test.exe")).isEmpty());
     }
 
-    @Test void requestsALargerShellSourceThanItsRenderedSize() {
-        assertTrue(InstalledApplicationIconResolver.shellIconSourceSize() > 48);
+    @Test void readsNativeLargeIconForAWindowsExecutable() {
+        Path notepad = Path.of(System.getenv().getOrDefault("WINDIR", "C:\\Windows"), "System32", "notepad.exe");
+        if (!Files.isRegularFile(notepad)) return;
+        assertTrue(InstalledApplicationIconResolver.loadWindowsExecutableIcon(notepad)
+                .map(image -> image.getWidth() >= 32 && image.getHeight() >= 32)
+                .orElse(false));
     }
 }
