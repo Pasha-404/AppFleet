@@ -30,6 +30,7 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UsePreviousAppDir=yes
+UsePreviousTasks=yes
 CloseApplications=yes
 RestartApplications=no
 Compression=lzma2
