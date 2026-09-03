@@ -320,6 +320,21 @@ public final class AppFleetService implements AutoCloseable {
         if (manifest != null) try { return registry.findStandardApplication(manifest.appId()).map(InstalledApplication::version).orElse(state.installedVersion()); } catch (IOException ignored) { return state.installedVersion(); }
         return state.installedVersion();
     }
+    private RepositoryState withDetectedStandard(RepositoryState state, AppFleetManifest manifest) {
+        if (manifest == null) return state;
+        try {
+            return registry.findStandardApplication(manifest.appId()).map(application -> mergeDetectedStandard(state, application)).orElse(state);
+        } catch (IOException ignored) {
+            return state;
+        }
+    }
+    static RepositoryState mergeDetectedStandard(RepositoryState state, InstalledApplication application) {
+        Set<String> processNames = state.processNames().isEmpty() && application.processName() != null && !application.processName().isBlank()
+                ? Set.of(application.processName()) : state.processNames();
+        return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(), state.selectedPackageType(), state.selectedArchitecture(), state.selectionTokens(),
+                application.version(), state.installedAssetId(), state.installedPackageType(), application.installLocation().toString(), application.executable().toString(), processNames,
+                state.releaseEtag(), state.lastCheckedAt(), state.lastCheckResult());
+    }
 
     private ApplicationSnapshot cachedSnapshotDuringCooldown(RepositoryId id, RepositoryState state) {
         Instant until;
@@ -376,7 +391,8 @@ public final class AppFleetService implements AutoCloseable {
     }
 
     private ApplicationSnapshot snapshot(RepositoryId id, RepositoryState state, AppStatus status, GithubRelease release, ReleaseAsset asset, List<ReleaseAsset> candidates, AppFleetManifest manifest, String message) {
-        return new ApplicationSnapshot(id, state, status, manifest == null ? id.repository() : manifest.name(), installedVersion(state, manifest), release, asset, candidates, manifest, message);
+        RepositoryState discovered = withDetectedStandard(state, manifest);
+        return new ApplicationSnapshot(id, discovered, status, manifest == null ? id.repository() : manifest.name(), installedVersion(discovered, manifest), release, asset, candidates, manifest, message);
     }
     private static String messageFor(AssetSelection selection, AppStatus status) { return switch (selection) { case AssetSelection.Selected selected -> selected.fromManifest() ? "Файл выбран по проверенному appfleet-manifest.json" : "Файл выбран автоматически; проверьте его перед установкой"; case AssetSelection.NeedsChoice ignored -> "Найдено несколько равнозначных файлов релиза"; case AssetSelection.None none -> none.reason(); }; }
     private synchronized ApplicationSnapshot requireSnapshot(RepositoryId id) { ApplicationSnapshot snapshot = snapshots.get(id.normalizedKey()); if (snapshot == null) throw new IllegalStateException("Сначала выполните проверку репозитория"); return snapshot; }
