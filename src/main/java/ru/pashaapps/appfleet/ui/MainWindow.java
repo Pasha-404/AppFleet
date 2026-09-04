@@ -72,7 +72,7 @@ public final class MainWindow {
         stage.setMinWidth(760); stage.setMinHeight(600); stage.setScene(scene); stage.show();
         startInitialSequence();
     }
-    public void close() { startupWorker.shutdownNow(); service.close(); }
+    public void close() { startupWorker.shutdownNow(); icons.close(); service.close(); }
 
     private Node titleBar() {
         Label title = new Label("AppFleet"); title.getStyleClass().add("app-title");
