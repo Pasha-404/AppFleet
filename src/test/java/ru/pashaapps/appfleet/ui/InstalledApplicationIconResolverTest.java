@@ -19,7 +19,15 @@ class InstalledApplicationIconResolverTest {
         assertTrue(InstalledApplicationIconResolver.loadSystemIcon(Path.of("missing-appfleet-test.exe")).isEmpty());
     }
 
-    @Test void readsHighResolutionShellIconForAWindowsExecutable() {
+    @Test void readsEmbeddedHighResolutionIconForAWindowsExecutable() {
+        Path notepad = Path.of(System.getenv().getOrDefault("WINDIR", "C:\\Windows"), "System32", "notepad.exe");
+        if (!Files.isRegularFile(notepad)) return;
+        assertTrue(InstalledApplicationIconResolver.loadWindowsEmbeddedExecutableIcon(notepad)
+                .map(image -> image.getWidth() >= 48 && image.getHeight() >= 48)
+                .orElse(false));
+    }
+
+    @Test void readsHighResolutionShellFallbackIconForAWindowsExecutable() {
         Path notepad = Path.of(System.getenv().getOrDefault("WINDIR", "C:\\Windows"), "System32", "notepad.exe");
         if (!Files.isRegularFile(notepad)) return;
         assertTrue(InstalledApplicationIconResolver.loadWindowsShellItemIcon(notepad)

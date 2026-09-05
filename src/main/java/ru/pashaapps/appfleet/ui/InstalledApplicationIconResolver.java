@@ -11,18 +11,24 @@ import com.sun.jna.platform.win32.COM.COMUtils;
 import com.sun.jna.platform.win32.COM.Unknown;
 import com.sun.jna.platform.win32.GDI32;
 import com.sun.jna.platform.win32.Guid;
+import com.sun.jna.platform.win32.Kernel32;
 import com.sun.jna.platform.win32.Ole32;
 import com.sun.jna.platform.win32.Shell32;
 import com.sun.jna.platform.win32.User32;
+import com.sun.jna.platform.win32.WinBase;
 import com.sun.jna.platform.win32.WinDef.HDC;
 import com.sun.jna.platform.win32.WinDef.HBITMAP;
 import com.sun.jna.platform.win32.WinDef.HICON;
+import com.sun.jna.platform.win32.WinDef.HMODULE;
+import com.sun.jna.platform.win32.WinDef.HRSRC;
 import com.sun.jna.platform.win32.WinGDI;
 import com.sun.jna.platform.win32.WinGDI.BITMAPINFO;
 import com.sun.jna.platform.win32.WinGDI.BITMAPINFOHEADER;
 import com.sun.jna.platform.win32.WinGDI.BITMAP;
 import com.sun.jna.platform.win32.WinGDI.ICONINFO;
+import com.sun.jna.platform.win32.WinNT.HANDLE;
 import com.sun.jna.platform.win32.WinNT.HRESULT;
+import com.sun.jna.platform.win32.WinUser;
 import com.sun.jna.platform.win32.WinUser.SIZE;
 import com.sun.jna.ptr.PointerByReference;
 import com.sun.jna.win32.StdCallLibrary;
@@ -32,6 +38,8 @@ import javafx.scene.control.Label;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
 import javafx.scene.layout.StackPane;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import ru.pashaapps.appfleet.service.ApplicationSnapshot;
 
 import javax.imageio.ImageIO;
@@ -52,13 +60,25 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
-/** Reads a high-resolution Windows Shell icon of a detected executable without blocking the UI. */
+/** Resolves a detected executable's embedded high-resolution icon without blocking the UI. */
 final class InstalledApplicationIconResolver implements AutoCloseable {
+    private static final Logger log = LoggerFactory.getLogger(InstalledApplicationIconResolver.class);
     private static final int ICON_SIZE = 48;
     private static final int SHELL_ICON_REQUEST_SIZE = 96;
+    private static final int EMBEDDED_ICON_REQUEST_SIZE = 256;
     private static final int MAX_NATIVE_ICON_SIZE = 256;
     private static final int COLOR_DEPTH = 24;
+    private static final int RT_ICON = 3;
+    private static final int RT_GROUP_ICON = 14;
+    private static final int GROUP_ICON_HEADER_BYTES = 6;
+    private static final int GROUP_ICON_ENTRY_BYTES = 14;
+    private static final int MAX_GROUP_ICON_ENTRIES = 128;
+    private static final int MAX_ICON_RESOURCE_BYTES = 16 * 1024 * 1024;
+    private static final int ICON_RESOURCE_VERSION = 0x00030000;
+    private static final int LOAD_LIBRARY_AS_IMAGE_RESOURCE = 0x00000020;
+    private static final int RESOURCE_ONLY_LOAD_FLAGS = Kernel32.LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE;
     private static final Guid.IID IID_ISHELL_ITEM = new Guid.IID("{43826D1E-E718-42EE-BC55-A1E261C37BFE}");
     private static final Guid.IID IID_ISHELL_ITEM_IMAGE_FACTORY = new Guid.IID("{BCC18B79-BA16-442F-80C4-8A59C30C463B}");
     private static final int SIIGBF_BIGGERSIZEOK = 0x00000001;
@@ -86,11 +106,108 @@ final class InstalledApplicationIconResolver implements AutoCloseable {
     }
 
     private static Optional<BufferedImage> loadBestIcon(Path executable) {
+        Optional<BufferedImage> embeddedIcon = loadWindowsEmbeddedExecutableIcon(executable);
+        if (embeddedIcon.isPresent()) {
+            log.info("Иконка {}: встроенный ресурс EXE {}×{}", executable.getFileName(), embeddedIcon.get().getWidth(), embeddedIcon.get().getHeight());
+            return embeddedIcon;
+        }
+
         Optional<BufferedImage> shellImage = loadWindowsShellItemIcon(executable);
-        if (shellImage.isPresent()) return shellImage;
+        if (shellImage.isPresent()) {
+            log.warn("Иконка {}: Shell fallback {}×{} (встроенный ресурс EXE недоступен)", executable.getFileName(), shellImage.get().getWidth(), shellImage.get().getHeight());
+            return shellImage;
+        }
 
         Optional<BufferedImage> extractedIcon = loadWindowsExecutableIcon(executable);
-        return extractedIcon.isPresent() ? extractedIcon : loadShellFallback(executable);
+        if (extractedIcon.isPresent()) {
+            log.warn("Иконка {}: ExtractIconEx fallback {}×{} (Shell и встроенный ресурс EXE недоступны)", executable.getFileName(), extractedIcon.get().getWidth(), extractedIcon.get().getHeight());
+            return extractedIcon;
+        }
+
+        Optional<BufferedImage> fileSystemIcon = loadShellFallback(executable);
+        if (fileSystemIcon.isPresent()) log.warn("Иконка {}: системный fallback {}×{} (встроенный ресурс EXE и Shell недоступны)", executable.getFileName(), fileSystemIcon.get().getWidth(), fileSystemIcon.get().getHeight());
+        else log.warn("Иконка {}: нативная иконка недоступна; будет показана буквенная заглушка", executable.getFileName());
+        return fileSystemIcon;
+    }
+
+    /**
+     * Reads the icon resource directly from a PE module opened as data, so no code from the
+     * target executable or DLL is loaded or run. This avoids the Windows Shell icon cache.
+     */
+    static Optional<BufferedImage> loadWindowsEmbeddedExecutableIcon(Path executable) {
+        if (!Platform.isWindows() || executable == null || !Files.isRegularFile(executable)) return Optional.empty();
+
+        HMODULE module = null;
+        HICON icon = null;
+        try {
+            module = Kernel32.INSTANCE.LoadLibraryEx(executable.toString(), null, RESOURCE_ONLY_LOAD_FLAGS);
+            if (isNull(module)) return Optional.empty();
+
+            ResourceName groupName = firstGroupIconName(module);
+            if (groupName == null) return Optional.empty();
+            ResourcePointer groupNamePointer = groupName.asPointer();
+            HRSRC groupResource = Kernel32.INSTANCE.FindResource(module, groupNamePointer.pointer(), resourceId(RT_GROUP_ICON));
+            if (isNull(groupResource)) return Optional.empty();
+
+            HANDLE loadedGroup = Kernel32.INSTANCE.LoadResource(module, groupResource);
+            int groupSize = Kernel32.INSTANCE.SizeofResource(module, groupResource);
+            Pointer groupData = isNull(loadedGroup) ? null : Kernel32.INSTANCE.LockResource(loadedGroup);
+            if (!isValidGroupIconDirectory(groupData, groupSize)) return Optional.empty();
+
+            int iconResourceId = User32IconResources.INSTANCE.LookupIconIdFromDirectoryEx(
+                    groupData, true, EMBEDDED_ICON_REQUEST_SIZE, EMBEDDED_ICON_REQUEST_SIZE, WinUser.LR_DEFAULTCOLOR);
+            if (iconResourceId == 0) return Optional.empty();
+
+            HRSRC iconResource = Kernel32.INSTANCE.FindResource(module, resourceId(iconResourceId), resourceId(RT_ICON));
+            if (isNull(iconResource)) return Optional.empty();
+            HANDLE loadedIcon = Kernel32.INSTANCE.LoadResource(module, iconResource);
+            int iconSize = Kernel32.INSTANCE.SizeofResource(module, iconResource);
+            Pointer iconData = isNull(loadedIcon) ? null : Kernel32.INSTANCE.LockResource(loadedIcon);
+            if (iconData == null || iconSize <= 0 || iconSize > MAX_ICON_RESOURCE_BYTES) return Optional.empty();
+
+            icon = User32IconResources.INSTANCE.CreateIconFromResourceEx(
+                    iconData, iconSize, true, ICON_RESOURCE_VERSION,
+                    EMBEDDED_ICON_REQUEST_SIZE, EMBEDDED_ICON_REQUEST_SIZE, WinUser.LR_DEFAULTCOLOR);
+            return isNull(icon) ? Optional.empty() : Optional.ofNullable(renderWindowsIcon(icon));
+        } catch (LinkageError | RuntimeException failure) {
+            log.debug("Не удалось извлечь встроенную иконку из {}", executable, failure);
+            return Optional.empty();
+        } finally {
+            if (!isNull(icon)) User32.INSTANCE.DestroyIcon(icon);
+            if (!isNull(module)) Kernel32.INSTANCE.FreeLibrary(module);
+        }
+    }
+
+    private static ResourceName firstGroupIconName(HMODULE module) {
+        AtomicReference<ResourceName> name = new AtomicReference<>();
+        WinBase.EnumResNameProc selectFirst = (loadedModule, type, resourceName, context) -> {
+            name.compareAndSet(null, ResourceName.copyOf(resourceName));
+            return false;
+        };
+        try {
+            Kernel32.INSTANCE.EnumResourceNames(module, resourceId(RT_GROUP_ICON), selectFirst, null);
+            return name.get();
+        } catch (LinkageError | RuntimeException failure) {
+            log.debug("Не удалось перечислить RT_GROUP_ICON", failure);
+            return null;
+        }
+    }
+
+    private static boolean isValidGroupIconDirectory(Pointer directory, int size) {
+        if (directory == null || size < GROUP_ICON_HEADER_BYTES) return false;
+        int reserved = Short.toUnsignedInt(directory.getShort(0));
+        int type = Short.toUnsignedInt(directory.getShort(2));
+        int count = Short.toUnsignedInt(directory.getShort(4));
+        long requiredBytes = GROUP_ICON_HEADER_BYTES + (long) count * GROUP_ICON_ENTRY_BYTES;
+        return reserved == 0 && type == 1 && count > 0 && count <= MAX_GROUP_ICON_ENTRIES && requiredBytes <= size;
+    }
+
+    private static Pointer resourceId(int id) {
+        return Pointer.createConstant(Integer.toUnsignedLong(id));
+    }
+
+    private static boolean isNull(HANDLE handle) {
+        return handle == null || handle.getPointer() == null || Pointer.nativeValue(handle.getPointer()) == 0;
     }
 
     /**
@@ -364,6 +481,33 @@ final class InstalledApplicationIconResolver implements AutoCloseable {
 
         HRESULT SHCreateItemFromParsingName(WString path, Pointer bindContext, Guid.REFIID requestedInterface, PointerByReference shellItem);
     }
+
+    /** Win32 icon-resource APIs that are not exposed by the JNA platform mappings. */
+    private interface User32IconResources extends StdCallLibrary {
+        User32IconResources INSTANCE = Native.load("user32", User32IconResources.class);
+
+        int LookupIconIdFromDirectoryEx(Pointer directory, boolean icon, int width, int height, int flags);
+
+        HICON CreateIconFromResourceEx(Pointer bits, int bytes, boolean icon, int version, int width, int height, int flags);
+    }
+
+    private record ResourceName(Integer id, String text) {
+        private static ResourceName copyOf(Pointer resourceName) {
+            long rawValue = Pointer.nativeValue(resourceName);
+            if ((rawValue & ~0xFFFFL) == 0) return new ResourceName((int) rawValue, null);
+            return new ResourceName(null, resourceName.getWideString(0));
+        }
+
+        private ResourcePointer asPointer() {
+            if (id != null) return new ResourcePointer(resourceId(id), null);
+            Memory textMemory = new Memory((long) (text.length() + 1) * Native.WCHAR_SIZE);
+            textMemory.setWideString(0, text);
+            return new ResourcePointer(textMemory, textMemory);
+        }
+    }
+
+    /** Retains the native buffer for a string resource name until FindResource returns. */
+    private record ResourcePointer(Pointer pointer, Memory retainedMemory) {}
 
     private static final class ShellItemImageFactory extends Unknown {
         private ShellItemImageFactory(Pointer pointer) { super(pointer); }
