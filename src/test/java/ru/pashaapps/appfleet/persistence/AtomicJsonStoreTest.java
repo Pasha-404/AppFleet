@@ -24,6 +24,53 @@ class AtomicJsonStoreTest {
         store.write(new UserSettings(true, false, false));
         Files.writeString(temporaryDirectory.resolve("settings.json"), "broken json");
         assertEquals(new UserSettings(false, true, true), store.read().orElseThrow());
+        Files.delete(temporaryDirectory.resolve("settings.json.bak"));
+        assertEquals(new UserSettings(false, true, true), new AtomicJsonStore<>(AppFleetObjectMapper.create(), UserSettings.class, temporaryDirectory.resolve("settings.json")).read().orElseThrow());
+    }
+    @Test void corruptPrimaryDoesNotReplaceTheLastKnownGoodBackupOnNextWrite() throws IOException {
+        Path file = temporaryDirectory.resolve("settings.json");
+        AtomicJsonStore<UserSettings> store = new AtomicJsonStore<>(AppFleetObjectMapper.create(), UserSettings.class, file);
+        UserSettings first = new UserSettings(false, true, true);
+        store.write(first);
+        store.write(new UserSettings(true, false, false));
+        Files.writeString(file, "broken json");
+
+        store.write(new UserSettings(true, true, false));
+        Files.writeString(file, "broken json again");
+
+        assertEquals(first, store.read().orElseThrow());
+    }
+    @Test void deleteRemovesPrimaryAndBackupWithoutResurrection() throws IOException {
+        Path file = temporaryDirectory.resolve("settings.json");
+        AtomicJsonStore<UserSettings> store = new AtomicJsonStore<>(AppFleetObjectMapper.create(), UserSettings.class, file);
+        store.write(new UserSettings(false, true, true));
+        store.write(new UserSettings(true, false, false));
+
+        store.delete();
+
+        assertFalse(Files.exists(file));
+        assertFalse(Files.exists(temporaryDirectory.resolve("settings.json.bak")));
+        assertTrue(new AtomicJsonStore<>(AppFleetObjectMapper.create(), UserSettings.class, file).read().isEmpty());
+    }
+    @Test void nullPrimaryIsTreatedAsCorruptAndFallsBackToTheBackup() throws IOException {
+        Path file = temporaryDirectory.resolve("settings.json");
+        AtomicJsonStore<UserSettings> store = new AtomicJsonStore<>(AppFleetObjectMapper.create(), UserSettings.class, file);
+        UserSettings expected = new UserSettings(false, true, true);
+        store.write(expected);
+        store.write(new UserSettings(true, false, false));
+        Files.writeString(file, "null");
+
+        assertEquals(expected, store.read().orElseThrow());
+    }
+    @Test void semanticallyMalformedRepositoryStateFallsBackToTheBackup() throws IOException {
+        Path file = temporaryDirectory.resolve("repositories.json");
+        AtomicJsonStore<RepositoriesDocument> store = new AtomicJsonStore<>(AppFleetObjectMapper.create(), RepositoriesDocument.class, file);
+        RepositoriesDocument expected = new RepositoriesDocument(1, List.of(new RepositoryState(1, "Pasha-404", "sortit", "https://github.com/Pasha-404/sortit", null, null, null, null, null, null, null, null, null, null, null, null)));
+        store.write(expected);
+        store.write(new RepositoriesDocument(1, List.of()));
+        Files.writeString(file, "{\"schemaVersion\":1,\"repositories\":[{\"schemaVersion\":1,\"owner\":\"Pasha-404\",\"repository\":\"sortit\",\"canonicalUrl\":\"https://github.com/other/project\"}]}" );
+
+        assertEquals(expected, store.read().orElseThrow());
     }
     @Test void missingSettingsUseCompatibleDefaults() { assertEquals(UserSettings.defaults(), new UserSettings(null, null, null).normalized()); }
     @Test void persistsVerifiedStandardReleaseForOfflineFallback() throws IOException {

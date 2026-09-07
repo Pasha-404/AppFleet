@@ -77,7 +77,11 @@ public final class AppFleetService implements AutoCloseable {
     private static HttpClient defaultHttpClient() { return HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL).build(); }
 
     public synchronized UserSettings settings() { return settings; }
-    public synchronized void saveSettings(UserSettings candidate) throws IOException { settings = candidate.normalized(); settingsStore.write(settings); }
+    public synchronized void saveSettings(UserSettings candidate) throws IOException {
+        UserSettings normalized = candidate.normalized();
+        settingsStore.write(normalized);
+        settings = normalized;
+    }
     public synchronized List<OperationEntry> journalEntries() { return journal.entries(); }
     public void record(String repository, String operation, String result, String message, Throwable technical) { journal.write(repository, operation, result, message, technical); }
     public synchronized List<ApplicationSnapshot> currentSnapshots() { return List.copyOf(snapshots.values()); }
@@ -180,6 +184,7 @@ public final class AppFleetService implements AutoCloseable {
             try {
                 if (!accepted) {
                     journal.write(pending.plan().snapshot().repository().slug(), "Закрытие приложения", "Отменено", "Пользователь не разрешил принудительное завершение", null);
+                    pending.operationDirectory().detach();
                     return OperationResult.cancelled("Операция отменена пользователем", pending.plan().snapshot());
                 }
                 List<RunningApplication> closed = forceCloseExactProcesses(pending.plan().snapshot(), pending.forceCloseProcesses());
@@ -187,6 +192,7 @@ public final class AppFleetService implements AutoCloseable {
                 restarted.addAll(closed);
                 return launchVerifiedInstaller(pending.plan(), pending.installer(), pending.signature(), pending.operationDirectory(), restarted, operationProgress);
             } catch (Exception failure) {
+                pending.operationDirectory().detach();
                 journal.write(pending.plan().snapshot().repository().slug(), "Установка", "Ошибка", "Установка не выполнена: " + failure.getMessage(), failure);
                 return new OperationResult(false, false, "Установка не выполнена: " + failure.getMessage(), pending.plan().snapshot());
             } finally {
@@ -246,30 +252,29 @@ public final class AppFleetService implements AutoCloseable {
     private ManifestResult readManifestIfPresent(RepositoryId id, GithubRelease release) {
         Optional<ReleaseAsset> asset = release.assets().stream().filter(candidate -> candidate.name().equals("appfleet-manifest.json")).findFirst();
         if (asset.isEmpty()) return new ManifestResult(null, null, null);
-        Path operation = paths.temporaryRoot().resolve("manifest-" + UUID.randomUUID());
-        try {
-            DownloadedFile downloaded = downloader.download(asset.get().downloadUri(), operation, "appfleet-manifest.json", CancellationToken.NEVER_CANCELLED, DownloadProgress.NONE);
+        try (OperationDirectory operation = OperationDirectory.create(paths.temporaryRoot(), "manifest-")) {
+            DownloadedFile downloaded = downloader.download(asset.get().downloadUri(), operation.path(), "appfleet-manifest.json", CancellationToken.NEVER_CANCELLED, DownloadProgress.NONE);
             AppFleetManifest manifest = manifests.validate(Files.readAllBytes(downloaded.path()), id, release);
             ReleaseAsset selected = release.assets().stream().filter(candidate -> candidate.name().equals(manifest.installer().assetName())).findFirst().orElseThrow();
             return new ManifestResult(manifest, new AssetSelection.Selected(selected, true), null);
-        } catch (Exception invalid) { return new ManifestResult(null, null, invalid.getMessage());
-        } finally { deleteOperationDirectory(operation); }
+        } catch (Exception invalid) { return new ManifestResult(null, null, invalid.getMessage()); }
     }
     private OperationResult beginInstall(InstallationPlan plan, CancellationToken cancellation, DownloadProgress progress, OperationProgress operationProgress, OperationCoordinator.Lease lease) {
         ApplicationSnapshot snapshot = plan.snapshot();
         OperationPreview preview = plan.preview();
         RepositoryId id = snapshot.repository();
-        Path operation = paths.temporaryRoot().resolve("operation-" + UUID.randomUUID());
+        OperationDirectory operation = null;
         boolean waitingForForceConsent = false;
         try {
+            operation = OperationDirectory.create(paths.temporaryRoot(), "operation-");
             operationProgress.phaseChanged(OperationPhase.PREPARING);
             cancellation.throwIfCancelled();
             operationProgress.phaseChanged(OperationPhase.DOWNLOADING);
             journal.write(id.slug(), "Скачивание", "Начата", "Скачивается " + preview.assetName(), null);
-            DownloadedFile installer = downloader.download(snapshot.selectedAsset().downloadUri(), operation, snapshot.selectedAsset().name(), cancellation, progress);
+            DownloadedFile installer = downloader.download(snapshot.selectedAsset().downloadUri(), operation.path(), snapshot.selectedAsset().name(), cancellation, progress);
             cancellation.throwIfCancelled();
             operationProgress.phaseChanged(OperationPhase.VERIFYING);
-            AuthenticodeStatus signature = verifyDownloadedFile(snapshot, installer, operation, cancellation);
+            AuthenticodeStatus signature = verifyDownloadedFile(snapshot, installer, operation.path(), cancellation);
             cancellation.throwIfCancelled();
             ProcessClosePreparation closePreparation = closeRunningProcesses(snapshot, plan.request());
             if (!closePreparation.forceCloseProcesses().isEmpty() && !plan.request().forceCloseIfNeeded()) {
@@ -282,9 +287,11 @@ public final class AppFleetService implements AutoCloseable {
             if (!closePreparation.forceCloseProcesses().isEmpty()) closed.addAll(forceCloseExactProcesses(snapshot, closePreparation.forceCloseProcesses()));
             return launchVerifiedInstaller(plan, installer, signature, operation, closed, operationProgress);
         } catch (OperationCancelledException cancelled) {
+            if (operation != null) operation.detach();
             journal.write(id.slug(), "Установка", "Отменена", "Операция отменена пользователем", null);
             return OperationResult.cancelled("Операция отменена", snapshot);
         } catch (Exception failure) {
+            if (operation != null) operation.detach();
             journal.write(id.slug(), "Установка", "Ошибка", "Установка не выполнена: " + failure.getMessage(), failure);
             return new OperationResult(false, false, "Установка не выполнена: " + failure.getMessage(), snapshot);
         } finally {
@@ -293,7 +300,7 @@ public final class AppFleetService implements AutoCloseable {
         }
     }
 
-    private OperationResult launchVerifiedInstaller(InstallationPlan plan, DownloadedFile installer, AuthenticodeStatus signature, Path operation,
+    private OperationResult launchVerifiedInstaller(InstallationPlan plan, DownloadedFile installer, AuthenticodeStatus signature, OperationDirectory operation,
                                                      List<RunningApplication> previouslyRunning, OperationProgress operationProgress) throws IOException {
         ApplicationSnapshot snapshot = plan.snapshot();
         OperationPreview preview = plan.preview();
@@ -305,40 +312,92 @@ public final class AppFleetService implements AutoCloseable {
         journal.write(id.slug(), "Установка", "Начата", "Запускается " + preview.assetName(), null);
         InstallerExit exit;
         Optional<InstalledApplication> detectedInstallation = Optional.empty();
-        if (preview.packageType() == PackageType.ZIP) {
-            new ManagedZipInstaller(paths.programDirectory().getParent().getParent().resolve("AppFleetManaged")).install(installer.path(), id, CancellationToken.NEVER_CANCELLED);
-            exit = InstallerExit.forGeneric(0);
-        } else {
-            List<String> baseArguments = snapshot.manifest() == null ? List.of() : snapshot.manifest().installer().silentArgs();
-            List<String> arguments = withDesktopShortcutTask(baseArguments, firstInstallation, desktopShortcutRequested, desktopShortcutTask);
-            journal.write(id.slug(), "Запуск установщика", "Начата", "Запускается " + preview.assetName() + (arguments.isEmpty() ? "" : " с параметрами " + String.join(" ", arguments)), null);
-            operationProgress.phaseChanged(OperationPhase.WAITING_FOR_INSTALLER);
-            exit = new ExternalInstallerRunner().run(installer.path(), preview.packageType(), arguments);
-            journal.write(id.slug(), "Запуск установщика", "Завершён", "Установщик завершил основной процесс с кодом " + exit.code(), null);
-            if (!exit.successful()) throw new IOException(exit.message());
-            if (snapshot.manifest() != null && snapshot.manifest().detection() != null) {
-                detectedInstallation = Optional.of(new StandardInstallationAwaiter(registry).await(snapshot.manifest().appId(), snapshot.release().tagName(), Duration.ofSeconds(60)));
+        ManagedZipInstall managedZip = null;
+        boolean installedStatePersisted = false;
+        try {
+            if (preview.packageType() == PackageType.ZIP) {
+                managedZip = new ManagedZipInstaller(managedApplicationsRoot()).install(installer.path(), id, CancellationToken.NEVER_CANCELLED);
+                exit = InstallerExit.forGeneric(0);
+            } else {
+                List<String> baseArguments = snapshot.manifest() == null ? List.of() : snapshot.manifest().installer().silentArgs();
+                List<String> arguments = withDesktopShortcutTask(baseArguments, firstInstallation, desktopShortcutRequested, desktopShortcutTask);
+                journal.write(id.slug(), "Запуск установщика", "Начата", "Запускается " + preview.assetName() + (arguments.isEmpty() ? "" : " с параметрами " + String.join(" ", arguments)), null);
+                operationProgress.phaseChanged(OperationPhase.WAITING_FOR_INSTALLER);
+                exit = new ExternalInstallerRunner().run(installer.path(), preview.packageType(), arguments);
+                journal.write(id.slug(), "Запуск установщика", "Завершён", "Установщик завершил основной процесс с кодом " + exit.code(), null);
+                if (!exit.successful()) throw new IOException(exit.message());
+                if (snapshot.manifest() != null && snapshot.manifest().detection() != null) {
+                    detectedInstallation = Optional.of(new StandardInstallationAwaiter(registry).await(snapshot.manifest().appId(), snapshot.release().tagName(), Duration.ofSeconds(60)));
+                }
             }
+
+            RepositoryState installed = withInstalled(snapshot.persisted(), snapshot, preview.packageType(), detectedInstallation, managedZip);
+            synchronizedUpdateRepositories(repositories.repositories().stream().map(existing -> same(existing, id) ? installed : existing).toList());
+            installedStatePersisted = true;
+
+            // The state is durable now.  Losing only the obsolete backup is a recoverable cleanup warning,
+            // never a reason to discard the new installed directory.
+            if (managedZip != null) {
+                try {
+                    managedZip.completeSuccessfully();
+                } catch (IOException cleanupFailure) {
+                    journal.write(id.slug(), "Очистка ZIP-обновления", "Предупреждение", "Новая версия установлена, но резервная копия прежней версии пока не удалена", cleanupFailure);
+                }
+            }
+
+            Optional<Path> verifiedNewExecutable = managedZip == null
+                    ? detectedInstallation.map(InstalledApplication::executable)
+                    : Optional.of(managedZip.executable());
+            restartPreviouslyRunning(snapshot, previouslyRunning, verifiedNewExecutable, plan.settings());
+            ApplicationSnapshot updated = check(installed);
+            synchronized (this) { snapshots.put(id.normalizedKey(), updated); }
+            cleanDownloadedFilesAfterSuccess(operation, plan.settings(), id);
+            String resultMessage = exit.message();
+            if (signature == AuthenticodeStatus.NOT_SIGNED) {
+                String warning = "Установщик не имеет цифровой подписи. AppFleet проверил SHA-256 и продолжил установку.";
+                journal.write(id.slug(), "Проверка файла", "Предупреждение", warning, null);
+                resultMessage += "\n\nПредупреждение: " + warning;
+            }
+            if (desktopShortcutRequested && desktopShortcutTask == null) {
+                String warning = "Ярлык на рабочем столе не создан: manifest приложения не объявляет поддерживаемую Inno Setup task.";
+                journal.write(id.slug(), "Ярлык на рабочем столе", "Предупреждение", warning, null);
+                resultMessage += "\n\nПредупреждение: " + warning;
+            }
+            journal.write(id.slug(), "Установка", "Успешно", resultMessage, null);
+            return new OperationResult(true, exit.restartRequired(), resultMessage, updated);
+        } catch (Exception failure) {
+            if (managedZip != null && !installedStatePersisted) {
+                try {
+                    managedZip.rollback();
+                    journal.write(id.slug(), "Откат ZIP-установки", "Успешно", "Восстановлена прежняя управляемая версия", null);
+                } catch (IOException rollbackFailure) {
+                    failure.addSuppressed(rollbackFailure);
+                    journal.write(id.slug(), "Откат ZIP-установки", "Ошибка", "Не удалось восстановить прежнюю управляемую версию", rollbackFailure);
+                }
+            }
+            operation.detach();
+            if (failure instanceof IOException io) throw io;
+            throw new IOException("Не удалось завершить установку", failure);
         }
-        restartPreviouslyRunning(snapshot, previouslyRunning, detectedInstallation, plan.settings());
-        RepositoryState installed = withInstalled(snapshot.persisted(), snapshot, preview.packageType(), detectedInstallation);
-        synchronizedUpdateRepositories(repositories.repositories().stream().map(existing -> same(existing, id) ? installed : existing).toList());
-        ApplicationSnapshot updated = check(installed);
-        synchronized (this) { snapshots.put(id.normalizedKey(), updated); }
-        if (plan.settings().deleteInstallerAfterSuccess()) deleteOperationDirectory(operation);
-        String resultMessage = exit.message();
-        if (signature == AuthenticodeStatus.NOT_SIGNED) {
-            String warning = "Установщик не имеет цифровой подписи. AppFleet проверил SHA-256 и продолжил установку.";
-            journal.write(id.slug(), "Проверка файла", "Предупреждение", warning, null);
-            resultMessage += "\n\nПредупреждение: " + warning;
+    }
+
+    private Path managedApplicationsRoot() {
+        Path programDirectory = paths.programDirectory().toAbsolutePath().normalize();
+        Path parent = programDirectory.getParent();
+        if (parent == null) throw new IllegalStateException("Не определён каталог управляемых ZIP-приложений");
+        return parent.resolve("AppFleetManaged").normalize();
+    }
+
+    private void cleanDownloadedFilesAfterSuccess(OperationDirectory operation, UserSettings operationSettings, RepositoryId id) {
+        if (!operationSettings.deleteInstallerAfterSuccess()) {
+            operation.detach();
+            return;
         }
-        if (desktopShortcutRequested && desktopShortcutTask == null) {
-            String warning = "Ярлык на рабочем столе не создан: manifest приложения не объявляет поддерживаемую Inno Setup task.";
-            journal.write(id.slug(), "Ярлык на рабочем столе", "Предупреждение", warning, null);
-            resultMessage += "\n\nПредупреждение: " + warning;
+        try {
+            operation.close();
+        } catch (IOException cleanupFailure) {
+            journal.write(id.slug(), "Очистка скачанных файлов", "Предупреждение", "Установка завершена, но скачанные файлы пока не удалены", cleanupFailure);
         }
-        journal.write(id.slug(), "Установка", "Успешно", resultMessage, null);
-        return new OperationResult(true, exit.restartRequired(), resultMessage, updated);
     }
 
     static List<String> withDesktopShortcutTask(List<String> baseArguments, boolean firstInstallation, boolean requested, String taskName) {
@@ -424,13 +483,13 @@ public final class AppFleetService implements AutoCloseable {
     }
 
     private void restartPreviouslyRunning(ApplicationSnapshot snapshot, List<RunningApplication> previouslyRunning,
-                                          Optional<InstalledApplication> detectedInstallation, UserSettings operationSettings) {
+                                          Optional<Path> verifiedNewExecutable, UserSettings operationSettings) {
         if (!operationSettings.restartPreviouslyRunningApp() || previouslyRunning.isEmpty()) return;
-        if (detectedInstallation.isEmpty() || !Files.isRegularFile(detectedInstallation.get().executable())) {
-            journal.write(snapshot.repository().slug(), "Перезапуск приложения", "Предупреждение", "Перезапуск пропущен: новый главный EXE не подтверждён реестром", null);
+        if (verifiedNewExecutable.isEmpty() || !Files.isRegularFile(verifiedNewExecutable.get())) {
+            journal.write(snapshot.repository().slug(), "Перезапуск приложения", "Предупреждение", "Перезапуск пропущен: новый главный EXE не подтверждён", null);
             return;
         }
-        Path executable = detectedInstallation.get().executable();
+        Path executable = verifiedNewExecutable.get();
         try {
             new ProcessBuilder(executable.toString()).start();
             journal.write(snapshot.repository().slug(), "Перезапуск приложения", "Успешно", "Повторно запущен подтверждённый EXE " + executable, null);
@@ -532,7 +591,15 @@ public final class AppFleetService implements AutoCloseable {
     private static AssetSelectionRule toRule(RepositoryState state) { if (state.selectedPackageType() == null || state.selectedArchitecture() == null) return null; try { return new AssetSelectionRule(PackageType.valueOf(state.selectedPackageType()), Architecture.valueOf(state.selectedArchitecture()), state.selectionTokens()); } catch (IllegalArgumentException invalid) { return null; } }
     private static RepositoryState withRule(RepositoryState state, AssetSelectionRule rule) { return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(), rule.packageType().name(), rule.architecture().name(), rule.requiredTokens(), state.installedVersion(), state.installedAssetId(), state.installedPackageType(), state.installLocation(), state.executable(), state.processNames(), null, state.lastCheckedAt(), state.lastCheckResult()); }
     private static RepositoryState withCheck(RepositoryState state, String etag, String result) { return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(), state.selectedPackageType(), state.selectedArchitecture(), state.selectionTokens(), state.installedVersion(), state.installedAssetId(), state.installedPackageType(), state.installLocation(), state.executable(), state.processNames(), etag, Instant.now(), result); }
-    private static RepositoryState withInstalled(RepositoryState state, ApplicationSnapshot snapshot, PackageType type, Optional<InstalledApplication> detected) {
+    private static RepositoryState withInstalled(RepositoryState state, ApplicationSnapshot snapshot, PackageType type,
+                                                 Optional<InstalledApplication> detected, ManagedZipInstall managedZip) {
+        if (managedZip != null) {
+            Path executable = managedZip.executable();
+            return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(),
+                    state.selectedPackageType(), state.selectedArchitecture(), state.selectionTokens(), snapshot.release().tagName(),
+                    snapshot.selectedAsset().id(), type.name(), managedZip.workingDirectory().toString(), executable.toString(),
+                    Set.of(executable.getFileName().toString()), null, Instant.now(), "Установлено");
+        }
         Set<String> names = snapshot.manifest() == null ? state.processNames() : Set.copyOf(snapshot.manifest().processNames());
         String version = detected.map(InstalledApplication::version).orElse(snapshot.release().tagName());
         String location = detected.map(application -> application.installLocation().toString()).orElse(state.installLocation());
@@ -540,7 +607,15 @@ public final class AppFleetService implements AutoCloseable {
         return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(), state.selectedPackageType(), state.selectedArchitecture(), state.selectionTokens(), version, snapshot.selectedAsset().id(), type.name(), location, executable, names, null, Instant.now(), "Установлено");
     }
     private synchronized void synchronizedUpdateRepositories(List<RepositoryState> updated) { saveRepositories(updated); }
-    private void saveRepositories(List<RepositoryState> updated) { try { repositories = new RepositoriesDocument(1, updated); repositoriesStore.write(repositories); } catch (IOException failure) { throw new IllegalStateException("Не удалось сохранить список репозиториев", failure); } }
+    private void saveRepositories(List<RepositoryState> updated) {
+        try {
+            RepositoriesDocument next = new RepositoriesDocument(1, updated);
+            repositoriesStore.write(next);
+            repositories = next;
+        } catch (IOException failure) {
+            throw new IllegalStateException("Не удалось сохранить список репозиториев", failure);
+        }
+    }
     private void saveReleaseCache() {
         try { releaseCacheStore.write(new ReleaseCache(1, List.copyOf(releaseCache.values()))); }
         catch (IOException failure) { journal.write("AppFleet", "Кэш релизов", "Предупреждение", "Не удалось сохранить кэш релизов", failure); }
@@ -555,7 +630,6 @@ public final class AppFleetService implements AutoCloseable {
         pendingInstallation = null;
         return pending;
     }
-    private static void deleteOperationDirectory(Path operation) { try { if (!Files.exists(operation)) return; try (var walk = Files.walk(operation)) { walk.sorted(Comparator.reverseOrder()).forEach(path -> { try { Files.deleteIfExists(path); } catch (IOException ignored) { } }); } } catch (IOException ignored) { } }
     @Override public void close() {
         PendingInstallation pending;
         synchronized (this) {
@@ -571,6 +645,6 @@ public final class AppFleetService implements AutoCloseable {
         private static ProcessClosePreparation empty() { return new ProcessClosePreparation(List.of(), List.of()); }
     }
     private record PendingInstallation(ForceCloseContinuation continuation, InstallationPlan plan, DownloadedFile installer,
-                                       AuthenticodeStatus signature, Path operationDirectory, List<RunningApplication> gracefullyClosed,
+                                       AuthenticodeStatus signature, OperationDirectory operationDirectory, List<RunningApplication> gracefullyClosed,
                                        List<RunningApplication> forceCloseProcesses, OperationCoordinator.Lease lease) { }
 }

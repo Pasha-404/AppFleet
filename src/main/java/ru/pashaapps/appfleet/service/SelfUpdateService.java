@@ -9,6 +9,7 @@ import ru.pashaapps.appfleet.github.GithubApiClient;
 import ru.pashaapps.appfleet.install.*;
 import ru.pashaapps.appfleet.persistence.AppPaths;
 import ru.pashaapps.appfleet.persistence.AtomicJsonStore;
+import ru.pashaapps.appfleet.persistence.OperationDirectory;
 
 import java.io.IOException;
 import java.net.http.HttpClient;
@@ -18,7 +19,6 @@ import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
-import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 
@@ -53,9 +53,11 @@ public final class SelfUpdateService {
             Optional<SemVersion> running = SemVersion.tryParse(build.version());
             Optional<SemVersion> target = SemVersion.tryParse(marker.targetVersion());
             if (running.isPresent() && target.isPresent() && running.get().equals(target.get())) {
+                cleanMarkedOperation(marker);
                 clearMarker();
                 log.info("Самообновление до {} подтверждено запуском новой версии", marker.targetVersion());
             } else {
+                cleanMarkedOperation(marker);
                 clearMarker();
                 log.warn("Предыдущее самообновление до {} не подтвердилось. Повторная попытка доступна пользователю.", marker.targetVersion());
             }
@@ -78,12 +80,12 @@ public final class SelfUpdateService {
     public boolean install(SelfUpdateOffer offer, CancellationToken cancellation, DownloadProgress progress, OperationProgress operationProgress) throws IOException {
         OperationCoordinator.Lease lease = operations.tryAcquire(OperationCoordinator.OperationKind.SELF_UPDATE, "AppFleet " + offer.manifest().version())
                 .orElseThrow(() -> new IOException("Уже выполняется другая установка или самообновление AppFleet. Дождитесь её завершения."));
-        Path operation = paths.temporaryRoot().resolve("self-update-" + UUID.randomUUID());
+        OperationDirectory operation = OperationDirectory.create(paths.temporaryRoot(), "self-update-");
         try (lease) {
             operationProgress.phaseChanged(OperationPhase.DOWNLOADING);
-            DownloadedFile installer = downloader.download(offer.installer().downloadUri(), operation, offer.installer().name(), cancellation, progress);
+            DownloadedFile installer = downloader.download(offer.installer().downloadUri(), operation.path(), offer.installer().name(), cancellation, progress);
             ReleaseAsset checksumAsset = offer.release().assets().stream().filter(asset -> asset.name().equals(offer.manifest().installer().sha256AssetName())).findFirst().orElseThrow(() -> new IOException("В релизе AppFleet отсутствует SHA-256"));
-            DownloadedFile checksum = downloader.download(checksumAsset.downloadUri(), operation, checksumAsset.name(), cancellation, DownloadProgress.NONE);
+            DownloadedFile checksum = downloader.download(checksumAsset.downloadUri(), operation.path(), checksumAsset.name(), cancellation, DownloadProgress.NONE);
             ChecksumVerifier verifier = new ChecksumVerifier();
             cancellation.throwIfCancelled();
             operationProgress.phaseChanged(OperationPhase.VERIFYING);
@@ -92,16 +94,22 @@ public final class SelfUpdateService {
 
             // This marker represents an unconfirmed external installer launch, not a retry lock.
             cancellation.throwIfCancelled();
-            markerStore.write(new SelfUpdateMarker(offer.manifest().version(), 1, operation.toString(), Instant.now()));
+            markerStore.write(new SelfUpdateMarker(offer.manifest().version(), 1, operation.path().toString(), Instant.now()));
             try {
                 operationProgress.phaseChanged(OperationPhase.LAUNCHING_INSTALLER);
                 new ProcessBuilder(commandFor(installer.path())).start();
+                operation.detach();
                 return true;
             } catch (IOException | RuntimeException failure) {
                 clearMarker();
                 throw failure;
             }
         } finally {
+            try {
+                operation.close();
+            } catch (IOException cleanupFailure) {
+                log.warn("Не удалось очистить временный каталог самообновления", cleanupFailure);
+            }
             operationProgress.phaseChanged(OperationPhase.FINISHED);
         }
     }
@@ -111,12 +119,21 @@ public final class SelfUpdateService {
     }
     private AppFleetManifest readManifest(RepositoryId repository, GithubRelease release) {
         ReleaseAsset asset = release.assets().stream().filter(candidate -> candidate.name().equals("appfleet-manifest.json")).findFirst().orElseThrow(() -> new IllegalArgumentException("В релизе AppFleet отсутствует appfleet-manifest.json"));
-        Path operation = paths.temporaryRoot().resolve("self-manifest-" + UUID.randomUUID());
-        try {
-            DownloadedFile file = downloader.download(asset.downloadUri(), operation, asset.name(), CancellationToken.NEVER_CANCELLED, DownloadProgress.NONE);
+        try (OperationDirectory operation = OperationDirectory.create(paths.temporaryRoot(), "self-manifest-")) {
+            DownloadedFile file = downloader.download(asset.downloadUri(), operation.path(), asset.name(), CancellationToken.NEVER_CANCELLED, DownloadProgress.NONE);
             return manifests.validate(Files.readAllBytes(file.path()), repository, release);
         } catch (IOException failure) { throw new IllegalArgumentException("Не удалось загрузить manifest обновления AppFleet", failure); }
-        finally { deleteDirectory(operation); }
+    }
+
+    private void cleanMarkedOperation(SelfUpdateMarker marker) {
+        try {
+            boolean removed = OperationDirectory.deleteRecovered(paths.temporaryRoot(), marker.operationDirectory(), "self-update-");
+            if (!removed && marker.operationDirectory() != null && !marker.operationDirectory().isBlank()) {
+                log.warn("Не удалён временный каталог самообновления: marker не подтверждает владение {}", marker.operationDirectory());
+            }
+        } catch (IOException failure) {
+            log.warn("Не удалось очистить подтверждённый временный каталог самообновления", failure);
+        }
     }
 
     private void clearMarker() {
@@ -126,5 +143,4 @@ public final class SelfUpdateService {
             log.warn("Не удалось очистить marker самообновления", failure);
         }
     }
-    private static void deleteDirectory(Path directory) { try { if (!Files.exists(directory)) return; try (var walk = Files.walk(directory)) { walk.sorted(Comparator.reverseOrder()).forEach(path -> { try { Files.deleteIfExists(path); } catch (IOException ignored) { } }); } } catch (IOException ignored) { } }
 }

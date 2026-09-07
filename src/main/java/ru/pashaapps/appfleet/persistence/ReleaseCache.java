@@ -9,6 +9,7 @@ import java.util.List;
 /** Last verified public release data, retained only to keep the UI useful during a temporary GitHub outage. */
 public record ReleaseCache(int schemaVersion, List<Entry> entries) {
     public ReleaseCache {
+        if (schemaVersion != 1) throw new IllegalArgumentException("Неподдерживаемая версия кэша релизов");
         entries = entries == null ? List.of() : List.copyOf(entries);
     }
 

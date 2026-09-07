@@ -28,7 +28,10 @@ public final class AtomicJsonStore<T> {
         Optional<T> primary = readOne(file);
         if (primary.isPresent()) return primary;
         Optional<T> backup = readOne(backupPath());
-        if (backup.isPresent()) log.warn("Восстановлено состояние AppFleet из резервной копии {}", backupPath());
+        if (backup.isPresent()) {
+            log.warn("Восстановлено состояние AppFleet из резервной копии {}", backupPath());
+            restorePrimaryFromBackup();
+        }
         return backup;
     }
 
@@ -39,12 +42,8 @@ public final class AtomicJsonStore<T> {
             mapper.writerWithDefaultPrettyPrinter().writeValue(temporary.toFile(), value);
             // A parse round-trip ensures a partially encoded write is never promoted.
             mapper.readValue(temporary.toFile(), type);
-            if (Files.exists(file)) Files.copy(file, backupPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
-            try {
-                Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException notAtomic) {
-                Files.move(temporary, file, StandardCopyOption.REPLACE_EXISTING);
-            }
+            if (readOne(file).isPresent()) Files.copy(file, backupPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+            moveReplacing(temporary, file);
         } finally {
             Files.deleteIfExists(temporary);
         }
@@ -52,13 +51,44 @@ public final class AtomicJsonStore<T> {
 
     /** Removes both current and recovery copies so a completed one-shot marker cannot be restored from backup. */
     public void delete() throws IOException {
-        Files.deleteIfExists(file);
         Files.deleteIfExists(backupPath());
+        Files.deleteIfExists(file);
+    }
+
+    private void restorePrimaryFromBackup() {
+        try {
+            Files.createDirectories(file.getParent());
+            Path temporary = Files.createTempFile(file.getParent(), file.getFileName().toString(), ".restore.tmp");
+            try {
+                Files.copy(backupPath(), temporary, StandardCopyOption.REPLACE_EXISTING);
+                mapper.readValue(temporary.toFile(), type);
+                moveReplacing(temporary, file);
+            } finally {
+                Files.deleteIfExists(temporary);
+            }
+        } catch (IOException failure) {
+            log.warn("Не удалось восстановить основной файл состояния {} из резервной копии", file, failure);
+        }
+    }
+
+    private static void moveReplacing(Path source, Path destination) throws IOException {
+        try {
+            Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException notAtomic) {
+            Files.move(source, destination, StandardCopyOption.REPLACE_EXISTING);
+        }
     }
 
     private Optional<T> readOne(Path candidate) {
         if (!Files.isRegularFile(candidate)) return Optional.empty();
-        try { return Optional.of(mapper.readValue(candidate.toFile(), type)); }
+        try {
+            T decoded = mapper.readValue(candidate.toFile(), type);
+            if (decoded == null) {
+                log.warn("Повреждён файл состояния {}: вместо объекта записан null", candidate);
+                return Optional.empty();
+            }
+            return Optional.of(decoded);
+        }
         catch (IOException malformed) { log.warn("Повреждён файл состояния {}: {}", candidate, malformed.getMessage()); return Optional.empty(); }
     }
     private Path backupPath() { return file.resolveSibling(file.getFileName() + ".bak"); }
