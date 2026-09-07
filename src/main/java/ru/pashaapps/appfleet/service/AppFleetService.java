@@ -37,6 +37,7 @@ public final class AppFleetService implements AutoCloseable {
     private final Map<String, ApplicationSnapshot> snapshots = new LinkedHashMap<>();
     private final Map<String, ReleaseCache.Entry> releaseCache = new LinkedHashMap<>();
     private final Map<String, Instant> retryAfter = new HashMap<>();
+    private PendingInstallation pendingInstallation;
     private RepositoriesDocument repositories;
     private UserSettings settings;
 
@@ -141,7 +142,7 @@ public final class AppFleetService implements AutoCloseable {
         }
         ApplicationSnapshot snapshot = requireSnapshot(id);
         MinimumAppFleetVersion.requireSupported(appFleetVersion, snapshot.manifest());
-        return new InstallationPlan(UUID.randomUUID(), snapshot, preview(snapshot), request, Instant.now());
+        return new InstallationPlan(UUID.randomUUID(), snapshot, preview(snapshot), request, settings(), Instant.now());
     }
 
     private OperationPreview preview(ApplicationSnapshot snapshot) {
@@ -154,7 +155,7 @@ public final class AppFleetService implements AutoCloseable {
     public CompletableFuture<OperationResult> installOrUpdate(RepositoryId id, OperationRequest request, CancellationToken cancellation, DownloadProgress progress) {
         if (!request.confirmed()) {
             ApplicationSnapshot snapshot = requireSnapshot(id);
-            return CompletableFuture.completedFuture(new OperationResult(false, false, "Операция отменена", snapshot));
+            return CompletableFuture.completedFuture(OperationResult.cancelled("Операция отменена", snapshot));
         }
         return installOrUpdate(prepareInstallation(id, request), cancellation, progress);
     }
@@ -169,9 +170,28 @@ public final class AppFleetService implements AutoCloseable {
         if (lease == null) {
             return CompletableFuture.failedFuture(new IllegalStateException("Уже выполняется другая установка или самообновление AppFleet. Дождитесь её завершения."));
         }
+        return CompletableFuture.supplyAsync(() -> beginInstall(plan, cancellation, progress, operationProgress, lease), worker);
+    }
+
+    public CompletableFuture<OperationResult> continueAfterForceClose(ForceCloseContinuation continuation, boolean accepted, OperationProgress operationProgress) {
+        PendingInstallation pending = takePendingInstallation(continuation);
+        if (pending == null) return CompletableFuture.failedFuture(new IllegalStateException("Подтверждение закрытия уже обработано или устарело."));
         return CompletableFuture.supplyAsync(() -> {
-            try (lease) {
-                return performInstall(plan, cancellation, progress, operationProgress);
+            try {
+                if (!accepted) {
+                    journal.write(pending.plan().snapshot().repository().slug(), "Закрытие приложения", "Отменено", "Пользователь не разрешил принудительное завершение", null);
+                    return OperationResult.cancelled("Операция отменена пользователем", pending.plan().snapshot());
+                }
+                List<RunningApplication> closed = forceCloseExactProcesses(pending.plan().snapshot(), pending.forceCloseProcesses());
+                List<RunningApplication> restarted = new ArrayList<>(pending.gracefullyClosed());
+                restarted.addAll(closed);
+                return launchVerifiedInstaller(pending.plan(), pending.installer(), pending.signature(), pending.operationDirectory(), restarted, operationProgress);
+            } catch (Exception failure) {
+                journal.write(pending.plan().snapshot().repository().slug(), "Установка", "Ошибка", "Установка не выполнена: " + failure.getMessage(), failure);
+                return new OperationResult(false, false, "Установка не выполнена: " + failure.getMessage(), pending.plan().snapshot());
+            } finally {
+                operationProgress.phaseChanged(OperationPhase.FINISHED);
+                pending.lease().close();
             }
         }, worker);
     }
@@ -235,19 +255,15 @@ public final class AppFleetService implements AutoCloseable {
         } catch (Exception invalid) { return new ManifestResult(null, null, invalid.getMessage());
         } finally { deleteOperationDirectory(operation); }
     }
-    private OperationResult performInstall(InstallationPlan plan, CancellationToken cancellation, DownloadProgress progress, OperationProgress operationProgress) {
+    private OperationResult beginInstall(InstallationPlan plan, CancellationToken cancellation, DownloadProgress progress, OperationProgress operationProgress, OperationCoordinator.Lease lease) {
         ApplicationSnapshot snapshot = plan.snapshot();
         OperationPreview preview = plan.preview();
-        OperationRequest request = plan.request();
         RepositoryId id = snapshot.repository();
-        boolean firstInstallation = snapshot.status() == AppStatus.NOT_INSTALLED;
-        boolean desktopShortcutRequested = firstInstallation && settings().createDesktopShortcutForNewApplications();
-        String desktopShortcutTask = desktopShortcutTask(snapshot, preview.packageType());
         Path operation = paths.temporaryRoot().resolve("operation-" + UUID.randomUUID());
+        boolean waitingForForceConsent = false;
         try {
             operationProgress.phaseChanged(OperationPhase.PREPARING);
             cancellation.throwIfCancelled();
-            List<RunningApplication> previouslyRunning = handleRunningProcesses(snapshot, request);
             operationProgress.phaseChanged(OperationPhase.DOWNLOADING);
             journal.write(id.slug(), "Скачивание", "Начата", "Скачивается " + preview.assetName(), null);
             DownloadedFile installer = downloader.download(snapshot.selectedAsset().downloadUri(), operation, snapshot.selectedAsset().name(), cancellation, progress);
@@ -255,54 +271,74 @@ public final class AppFleetService implements AutoCloseable {
             operationProgress.phaseChanged(OperationPhase.VERIFYING);
             AuthenticodeStatus signature = verifyDownloadedFile(snapshot, installer, operation, cancellation);
             cancellation.throwIfCancelled();
-            operationProgress.phaseChanged(OperationPhase.LAUNCHING_INSTALLER);
-            journal.write(id.slug(), "Установка", "Начата", "Запускается " + preview.assetName(), null);
-            InstallerExit exit;
-            Optional<InstalledApplication> detectedInstallation = Optional.empty();
-            if (preview.packageType() == PackageType.ZIP) {
-                new ManagedZipInstaller(paths.programDirectory().getParent().getParent().resolve("AppFleetManaged")).install(installer.path(), id, cancellation);
-                exit = InstallerExit.forGeneric(0);
-            } else {
-                List<String> baseArguments = snapshot.manifest() == null ? List.of() : snapshot.manifest().installer().silentArgs();
-                List<String> arguments = withDesktopShortcutTask(baseArguments, firstInstallation, desktopShortcutRequested, desktopShortcutTask);
-                journal.write(id.slug(), "Запуск установщика", "Начата", "Запускается " + preview.assetName() + (arguments.isEmpty() ? "" : " с параметрами " + String.join(" ", arguments)), null);
-                operationProgress.phaseChanged(OperationPhase.WAITING_FOR_INSTALLER);
-                exit = new ExternalInstallerRunner().run(installer.path(), preview.packageType(), arguments);
-                journal.write(id.slug(), "Запуск установщика", "Завершён", "Установщик завершил основной процесс с кодом " + exit.code(), null);
-                if (!exit.successful()) throw new IOException(exit.message());
-                if (snapshot.manifest() != null && snapshot.manifest().detection() != null) {
-                    detectedInstallation = Optional.of(new StandardInstallationAwaiter(registry).await(snapshot.manifest().appId(), snapshot.release().tagName(), Duration.ofSeconds(60)));
-                }
+            ProcessClosePreparation closePreparation = closeRunningProcesses(snapshot, plan.request());
+            if (!closePreparation.forceCloseProcesses().isEmpty() && !plan.request().forceCloseIfNeeded()) {
+                ForceCloseContinuation continuation = new ForceCloseContinuation(UUID.randomUUID(), snapshot.displayName(), closePreparation.forceCloseProcesses());
+                putPendingInstallation(new PendingInstallation(continuation, plan, installer, signature, operation, closePreparation.gracefullyClosed(), closePreparation.forceCloseProcesses(), lease));
+                waitingForForceConsent = true;
+                return OperationResult.forceCloseConfirmationRequired(snapshot, continuation);
             }
-            restartPreviouslyRunning(snapshot, previouslyRunning);
-            RepositoryState installed = withInstalled(snapshot.persisted(), snapshot, preview.packageType(), detectedInstallation);
-            synchronizedUpdateRepositories(repositories.repositories().stream().map(existing -> same(existing, id) ? installed : existing).toList());
-            ApplicationSnapshot updated = check(installed);
-            synchronized (this) { snapshots.put(id.normalizedKey(), updated); }
-            if (settings.deleteInstallerAfterSuccess()) deleteOperationDirectory(operation);
-            String resultMessage = exit.message();
-            if (signature == AuthenticodeStatus.NOT_SIGNED) {
-                String warning = "Установщик не имеет цифровой подписи. AppFleet проверил SHA-256 и продолжил установку.";
-                journal.write(id.slug(), "Проверка файла", "Предупреждение", warning, null);
-                resultMessage += "\n\nПредупреждение: " + warning;
-            }
-            if (desktopShortcutRequested && desktopShortcutTask == null) {
-                String warning = "Ярлык на рабочем столе не создан: manifest приложения не объявляет поддерживаемую Inno Setup task.";
-                journal.write(id.slug(), "Ярлык на рабочем столе", "Предупреждение", warning, null);
-                resultMessage += "\n\nПредупреждение: " + warning;
-            }
-            journal.write(id.slug(), "Установка", "Успешно", resultMessage, null);
-            return new OperationResult(true, exit.restartRequired(), resultMessage, updated);
+            List<RunningApplication> closed = new ArrayList<>(closePreparation.gracefullyClosed());
+            if (!closePreparation.forceCloseProcesses().isEmpty()) closed.addAll(forceCloseExactProcesses(snapshot, closePreparation.forceCloseProcesses()));
+            return launchVerifiedInstaller(plan, installer, signature, operation, closed, operationProgress);
         } catch (OperationCancelledException cancelled) {
             journal.write(id.slug(), "Установка", "Отменена", "Операция отменена пользователем", null);
-            return new OperationResult(false, false, "Операция отменена", snapshot);
+            return OperationResult.cancelled("Операция отменена", snapshot);
         } catch (Exception failure) {
             journal.write(id.slug(), "Установка", "Ошибка", "Установка не выполнена: " + failure.getMessage(), failure);
             return new OperationResult(false, false, "Установка не выполнена: " + failure.getMessage(), snapshot);
         } finally {
             operationProgress.phaseChanged(OperationPhase.FINISHED);
-            if (!settings.deleteInstallerAfterSuccess()) { /* temporary installer intentionally retained for user diagnostics */ }
+            if (!waitingForForceConsent) lease.close();
         }
+    }
+
+    private OperationResult launchVerifiedInstaller(InstallationPlan plan, DownloadedFile installer, AuthenticodeStatus signature, Path operation,
+                                                     List<RunningApplication> previouslyRunning, OperationProgress operationProgress) throws IOException {
+        ApplicationSnapshot snapshot = plan.snapshot();
+        OperationPreview preview = plan.preview();
+        RepositoryId id = snapshot.repository();
+        boolean firstInstallation = snapshot.status() == AppStatus.NOT_INSTALLED;
+        boolean desktopShortcutRequested = firstInstallation && plan.settings().createDesktopShortcutForNewApplications();
+        String desktopShortcutTask = desktopShortcutTask(snapshot, preview.packageType());
+        operationProgress.phaseChanged(OperationPhase.LAUNCHING_INSTALLER);
+        journal.write(id.slug(), "Установка", "Начата", "Запускается " + preview.assetName(), null);
+        InstallerExit exit;
+        Optional<InstalledApplication> detectedInstallation = Optional.empty();
+        if (preview.packageType() == PackageType.ZIP) {
+            new ManagedZipInstaller(paths.programDirectory().getParent().getParent().resolve("AppFleetManaged")).install(installer.path(), id, CancellationToken.NEVER_CANCELLED);
+            exit = InstallerExit.forGeneric(0);
+        } else {
+            List<String> baseArguments = snapshot.manifest() == null ? List.of() : snapshot.manifest().installer().silentArgs();
+            List<String> arguments = withDesktopShortcutTask(baseArguments, firstInstallation, desktopShortcutRequested, desktopShortcutTask);
+            journal.write(id.slug(), "Запуск установщика", "Начата", "Запускается " + preview.assetName() + (arguments.isEmpty() ? "" : " с параметрами " + String.join(" ", arguments)), null);
+            operationProgress.phaseChanged(OperationPhase.WAITING_FOR_INSTALLER);
+            exit = new ExternalInstallerRunner().run(installer.path(), preview.packageType(), arguments);
+            journal.write(id.slug(), "Запуск установщика", "Завершён", "Установщик завершил основной процесс с кодом " + exit.code(), null);
+            if (!exit.successful()) throw new IOException(exit.message());
+            if (snapshot.manifest() != null && snapshot.manifest().detection() != null) {
+                detectedInstallation = Optional.of(new StandardInstallationAwaiter(registry).await(snapshot.manifest().appId(), snapshot.release().tagName(), Duration.ofSeconds(60)));
+            }
+        }
+        restartPreviouslyRunning(snapshot, previouslyRunning, detectedInstallation, plan.settings());
+        RepositoryState installed = withInstalled(snapshot.persisted(), snapshot, preview.packageType(), detectedInstallation);
+        synchronizedUpdateRepositories(repositories.repositories().stream().map(existing -> same(existing, id) ? installed : existing).toList());
+        ApplicationSnapshot updated = check(installed);
+        synchronized (this) { snapshots.put(id.normalizedKey(), updated); }
+        if (plan.settings().deleteInstallerAfterSuccess()) deleteOperationDirectory(operation);
+        String resultMessage = exit.message();
+        if (signature == AuthenticodeStatus.NOT_SIGNED) {
+            String warning = "Установщик не имеет цифровой подписи. AppFleet проверил SHA-256 и продолжил установку.";
+            journal.write(id.slug(), "Проверка файла", "Предупреждение", warning, null);
+            resultMessage += "\n\nПредупреждение: " + warning;
+        }
+        if (desktopShortcutRequested && desktopShortcutTask == null) {
+            String warning = "Ярлык на рабочем столе не создан: manifest приложения не объявляет поддерживаемую Inno Setup task.";
+            journal.write(id.slug(), "Ярлык на рабочем столе", "Предупреждение", warning, null);
+            resultMessage += "\n\nПредупреждение: " + warning;
+        }
+        journal.write(id.slug(), "Установка", "Успешно", resultMessage, null);
+        return new OperationResult(true, exit.restartRequired(), resultMessage, updated);
     }
 
     static List<String> withDesktopShortcutTask(List<String> baseArguments, boolean firstInstallation, boolean requested, String taskName) {
@@ -335,30 +371,71 @@ public final class AppFleetService implements AutoCloseable {
         }
         return AuthenticodeStatus.UNAVAILABLE;
     }
-    private List<RunningApplication> handleRunningProcesses(ApplicationSnapshot snapshot, OperationRequest request) throws IOException {
+    private ProcessClosePreparation closeRunningProcesses(ApplicationSnapshot snapshot, OperationRequest request) throws IOException {
+        Path executable = verifiedInstalledExecutable(snapshot).orElse(null);
+        if (executable == null) return ProcessClosePreparation.empty();
         Set<String> names = snapshot.manifest() != null ? new LinkedHashSet<>(snapshot.manifest().processNames()) : snapshot.persisted().processNames();
-        if (names.isEmpty()) return List.of();
         ProcessManager processes = new ProcessManager();
-        List<RunningApplication> running = processes.findByExactNames(names);
-        if (running.isEmpty()) return List.of();
+        List<RunningApplication> running = processes.findByVerifiedExecutable(executable, names);
+        if (running.isEmpty()) return ProcessClosePreparation.empty();
         if (!request.closeRunningApplications()) throw new IOException("Приложение запущено; выберите «Закрыть автоматически» или отмените операцию");
+        List<RunningApplication> gracefullyClosed = new ArrayList<>();
+        List<RunningApplication> forceClose = new ArrayList<>();
         for (RunningApplication process : running) {
-            boolean closed = processes.requestGracefulClose(process, java.time.Duration.ofSeconds(10));
-            if (!closed && !request.forceCloseIfNeeded()) throw new IOException("Приложение не закрылось штатно; требуется отдельное подтверждение принудительного завершения");
-            if (!closed && !processes.forceCloseAfterExplicitConsent(process, java.time.Duration.ofSeconds(5))) throw new IOException("Не удалось закрыть запущенное приложение");
-            journal.write(snapshot.repository().slug(), "Закрытие приложения", "Успешно", "Закрыт процесс " + process.pid(), null);
-        }
-        return running;
-    }
-    private void restartPreviouslyRunning(ApplicationSnapshot snapshot, List<RunningApplication> previouslyRunning) {
-        if (!settings.restartPreviouslyRunningApp()) return;
-        for (RunningApplication process : previouslyRunning) {
-            try {
-                new ProcessBuilder(process.command()).start();
-                journal.write(snapshot.repository().slug(), "Перезапуск приложения", "Успешно", "Повторно запущен " + process.command(), null);
-            } catch (IOException failure) {
-                journal.write(snapshot.repository().slug(), "Перезапуск приложения", "Ошибка", "Не удалось повторно запустить приложение", failure);
+            switch (processes.requestGracefulClose(process, Duration.ofSeconds(10))) {
+                case CLOSED -> {
+                    gracefullyClosed.add(process);
+                    journal.write(snapshot.repository().slug(), "Закрытие приложения", "Успешно", "Приложение штатно завершило процесс " + process.pid(), null);
+                }
+                case NOT_RUNNING -> { /* The process ended on its own; it does not need restarting. */ }
+                case NO_TOP_LEVEL_WINDOW, STILL_RUNNING -> forceClose.add(process);
+                case IDENTITY_CHANGED -> throw new IOException("Процесс приложения изменился до закрытия; AppFleet не будет завершать другой процесс");
             }
+        }
+        return new ProcessClosePreparation(gracefullyClosed, forceClose);
+    }
+
+    private List<RunningApplication> forceCloseExactProcesses(ApplicationSnapshot snapshot, List<RunningApplication> selected) throws IOException {
+        ProcessManager processes = new ProcessManager();
+        List<RunningApplication> closed = new ArrayList<>();
+        for (RunningApplication process : selected) {
+            switch (processes.forceCloseAfterExplicitConsent(process, Duration.ofSeconds(5))) {
+                case CLOSED -> {
+                    closed.add(process);
+                    journal.write(snapshot.repository().slug(), "Закрытие приложения", "Успешно", "Принудительно завершён ранее подтверждённый процесс " + process.pid(), null);
+                }
+                case NOT_RUNNING -> { /* It ended while the user considered the dialog. */ }
+                case IDENTITY_CHANGED -> throw new IOException("Процесс приложения изменился после подтверждения; AppFleet не будет завершать другой процесс");
+                case STILL_RUNNING -> throw new IOException("Не удалось принудительно завершить ранее подтверждённый процесс " + process.pid());
+            }
+        }
+        return closed;
+    }
+
+    private Optional<Path> verifiedInstalledExecutable(ApplicationSnapshot snapshot) {
+        String saved = snapshot.persisted().executable();
+        if (saved == null || saved.isBlank()) return Optional.empty();
+        try {
+            Path executable = Path.of(saved).toAbsolutePath().normalize();
+            return Files.isRegularFile(executable) ? Optional.of(executable) : Optional.empty();
+        } catch (RuntimeException malformedPath) {
+            return Optional.empty();
+        }
+    }
+
+    private void restartPreviouslyRunning(ApplicationSnapshot snapshot, List<RunningApplication> previouslyRunning,
+                                          Optional<InstalledApplication> detectedInstallation, UserSettings operationSettings) {
+        if (!operationSettings.restartPreviouslyRunningApp() || previouslyRunning.isEmpty()) return;
+        if (detectedInstallation.isEmpty() || !Files.isRegularFile(detectedInstallation.get().executable())) {
+            journal.write(snapshot.repository().slug(), "Перезапуск приложения", "Предупреждение", "Перезапуск пропущен: новый главный EXE не подтверждён реестром", null);
+            return;
+        }
+        Path executable = detectedInstallation.get().executable();
+        try {
+            new ProcessBuilder(executable.toString()).start();
+            journal.write(snapshot.repository().slug(), "Перезапуск приложения", "Успешно", "Повторно запущен подтверждённый EXE " + executable, null);
+        } catch (IOException failure) {
+            journal.write(snapshot.repository().slug(), "Перезапуск приложения", "Ошибка", "Не удалось повторно запустить подтверждённый EXE", failure);
         }
     }
     private AppStatus statusFor(RepositoryState state, GithubRelease release, ReleaseAsset asset, List<ReleaseAsset> candidates, AppFleetManifest manifest) {
@@ -468,7 +545,32 @@ public final class AppFleetService implements AutoCloseable {
         try { releaseCacheStore.write(new ReleaseCache(1, List.copyOf(releaseCache.values()))); }
         catch (IOException failure) { journal.write("AppFleet", "Кэш релизов", "Предупреждение", "Не удалось сохранить кэш релизов", failure); }
     }
+    private synchronized void putPendingInstallation(PendingInstallation pending) {
+        if (pendingInstallation != null) throw new IllegalStateException("Уже ожидается подтверждение принудительного завершения");
+        pendingInstallation = pending;
+    }
+    private synchronized PendingInstallation takePendingInstallation(ForceCloseContinuation continuation) {
+        if (continuation == null || pendingInstallation == null || !pendingInstallation.continuation().id().equals(continuation.id())) return null;
+        PendingInstallation pending = pendingInstallation;
+        pendingInstallation = null;
+        return pending;
+    }
     private static void deleteOperationDirectory(Path operation) { try { if (!Files.exists(operation)) return; try (var walk = Files.walk(operation)) { walk.sorted(Comparator.reverseOrder()).forEach(path -> { try { Files.deleteIfExists(path); } catch (IOException ignored) { } }); } } catch (IOException ignored) { } }
-    @Override public void close() { worker.shutdownNow(); }
+    @Override public void close() {
+        PendingInstallation pending;
+        synchronized (this) {
+            pending = pendingInstallation;
+            pendingInstallation = null;
+        }
+        if (pending != null) pending.lease().close();
+        worker.shutdownNow();
+    }
     private record ManifestResult(AppFleetManifest manifest, AssetSelection selection, String failure) { }
+    private record ProcessClosePreparation(List<RunningApplication> gracefullyClosed, List<RunningApplication> forceCloseProcesses) {
+        private ProcessClosePreparation { gracefullyClosed = List.copyOf(gracefullyClosed); forceCloseProcesses = List.copyOf(forceCloseProcesses); }
+        private static ProcessClosePreparation empty() { return new ProcessClosePreparation(List.of(), List.of()); }
+    }
+    private record PendingInstallation(ForceCloseContinuation continuation, InstallationPlan plan, DownloadedFile installer,
+                                       AuthenticodeStatus signature, Path operationDirectory, List<RunningApplication> gracefullyClosed,
+                                       List<RunningApplication> forceCloseProcesses, OperationCoordinator.Lease lease) { }
 }

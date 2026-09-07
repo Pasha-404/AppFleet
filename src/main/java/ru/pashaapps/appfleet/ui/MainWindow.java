@@ -284,14 +284,36 @@ public final class MainWindow {
         service.installOrUpdate(plan, cancelled::get, updateProgress(progress), operationProgress(progress)).whenComplete((result, failure) -> Platform.runLater(() -> {
             progress.close();
             if (failure != null) { showError("Операция завершилась ошибкой", unwrap(failure).getMessage()); return; }
-            applications.setAll(service.currentSnapshots());
-            if (!result.successful() && result.message().contains("требуется отдельное подтверждение")) {
-                Alert force = new Alert(Alert.AlertType.CONFIRMATION, "Штатное закрытие приложения не удалось. Разрешить принудительно завершить только этот ранее обнаруженный процесс и продолжить установку?", ButtonType.OK, ButtonType.CANCEL);
+            if (result.requiresForceCloseConfirmation()) {
+                Alert force = new Alert(Alert.AlertType.CONFIRMATION, "Приложение не завершилось после штатного запроса закрытия. Разрешить принудительно завершить только ранее обнаруженные процессы и продолжить установку?", ButtonType.OK, ButtonType.CANCEL);
                 force.initOwner(stage); force.setHeaderText("Требуется отдельное подтверждение");
-                if (force.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) prepareAndRun(plan.snapshot(), new OperationRequest(true, true, true));
+                continueAfterForceClose(result.forceCloseContinuation(), force.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK);
                 return;
             }
+            applications.setAll(service.currentSnapshots());
             Alert outcome = new Alert(result.successful() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR, result.message(), ButtonType.OK); outcome.initOwner(stage); outcome.setHeaderText(result.successful() ? "Операция завершена" : "Операция не выполнена"); outcome.showAndWait();
+        }));
+    }
+
+    private void continueAfterForceClose(ForceCloseContinuation continuation, boolean accepted) {
+        if (!accepted) {
+            service.continueAfterForceClose(continuation, false, OperationProgress.NONE);
+            return;
+        }
+        AtomicBoolean ignoredCancellation = new AtomicBoolean();
+        Stage progress = progressStage("Завершение установки", ignoredCancellation);
+        showOperationPhase(progress, OperationPhase.LAUNCHING_INSTALLER);
+        service.continueAfterForceClose(continuation, true, operationProgress(progress)).whenComplete((result, failure) -> Platform.runLater(() -> {
+            progress.close();
+            if (failure != null) {
+                showError("Операция завершилась ошибкой", unwrap(failure).getMessage());
+                return;
+            }
+            applications.setAll(service.currentSnapshots());
+            Alert outcome = new Alert(result.successful() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR, result.message(), ButtonType.OK);
+            outcome.initOwner(stage);
+            outcome.setHeaderText(result.successful() ? "Операция завершена" : "Операция не выполнена");
+            outcome.showAndWait();
         }));
     }
     private Optional<OperationRequest> showOperationConfirmation(OperationPreview preview) {
@@ -305,7 +327,8 @@ public final class MainWindow {
     }
     private Stage progressStage(String title, AtomicBoolean cancelled) { Stage popup = new Stage(); popup.initOwner(stage); popup.initModality(Modality.WINDOW_MODAL); popup.setTitle(title); ProgressBar bar = new ProgressBar(ProgressIndicator.INDETERMINATE_PROGRESS); bar.setPrefWidth(330); Label label = new Label("Подготовка…"); Button cancel = new Button("Отмена"); cancel.setOnAction(event -> { cancelled.set(true); cancel.setDisable(true); label.setText("Отмена…"); }); VBox box = new VBox(12, label, bar, cancel); box.setPadding(new Insets(20)); box.setAlignment(Pos.CENTER); popup.setScene(new javafx.scene.Scene(box)); popup.setResizable(false); popup.show(); popup.getProperties().put("bar", bar); popup.getProperties().put("label", label); popup.getProperties().put("cancel", cancel); return popup; }
     private DownloadProgress updateProgress(Stage popup) { return (received, total) -> Platform.runLater(() -> { ProgressBar bar = (ProgressBar) popup.getProperties().get("bar"); Label label = (Label) popup.getProperties().get("label"); bar.setProgress(total <= 0 ? ProgressIndicator.INDETERMINATE_PROGRESS : (double) received / total); label.setText(total <= 0 ? humanSize(received) + " скачано" : humanSize(received) + " из " + humanSize(total)); }); }
-    private OperationProgress operationProgress(Stage popup) { return phase -> Platform.runLater(() -> { Label label = (Label) popup.getProperties().get("label"); Button cancel = (Button) popup.getProperties().get("cancel"); if (phase != OperationPhase.FINISHED) label.setText(phase.display()); cancel.setDisable(!phase.cancellable() || cancel.isDisable()); }); }
+    private OperationProgress operationProgress(Stage popup) { return phase -> Platform.runLater(() -> showOperationPhase(popup, phase)); }
+    private void showOperationPhase(Stage popup, OperationPhase phase) { Label label = (Label) popup.getProperties().get("label"); Button cancel = (Button) popup.getProperties().get("cancel"); if (phase != OperationPhase.FINISHED) label.setText(phase.display()); cancel.setDisable(!phase.cancellable() || cancel.isDisable()); }
     private void refreshJournal() { journalTable.setItems(FXCollections.observableArrayList(service.journalEntries())); }
     private void showTechnicalDetails(OperationEntry entry) { Alert detail = new Alert(Alert.AlertType.INFORMATION); detail.initOwner(stage); detail.setTitle("Технические подробности"); detail.setHeaderText(entry.operation() + " — " + entry.result()); TextArea area = new TextArea(entry.technicalDetails().isBlank() ? entry.message() : entry.technicalDetails()); area.setEditable(false); area.setWrapText(false); area.setPrefColumnCount(90); area.setPrefRowCount(20); detail.getDialogPane().setContent(area); detail.showAndWait(); }
     private static List<ReleaseAsset> assetCandidates(ApplicationSnapshot snapshot) {
