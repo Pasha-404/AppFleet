@@ -11,9 +11,9 @@ import java.util.UUID;
 
 /** Waits for a standard installer whose bootstrap process exited before its child installer finished. */
 public final class StandardInstallationAwaiter {
-    private final WindowsRegistryDetector registry;
+    private final InstallationDetector registry;
 
-    public StandardInstallationAwaiter(WindowsRegistryDetector registry) {
+    public StandardInstallationAwaiter(InstallationDetector registry) {
         this.registry = registry;
     }
 

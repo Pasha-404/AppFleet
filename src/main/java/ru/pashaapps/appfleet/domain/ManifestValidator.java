@@ -17,6 +17,7 @@ public final class ManifestValidator {
     private static final Pattern TECHNICAL_NAME = Pattern.compile("[A-Za-z0-9_-]+$");
     private static final Pattern INNO_TASK_NAME = Pattern.compile("[A-Za-z0-9_-]+$");
     private static final Set<String> INNO_ARGUMENTS = Set.of("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS");
+    private static final Set<String> REQUIRED_INNO_ARGUMENTS = Set.of("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS");
     private final ObjectMapper mapper;
 
     public ManifestValidator(ObjectMapper mapper) { this.mapper = mapper; }
@@ -34,7 +35,7 @@ public final class ManifestValidator {
             require(SemVersion.tryParse(version).isPresent(), "Версия манифеста должна быть SemVer");
             require(SemVersion.parse(version).equals(SemVersion.parse(release.tagName())), "Версия манифеста не соответствует tag релиза");
             String repositoryUrl = requiredText(root, "repositoryUrl");
-            require(RepositoryId.fromGithubUrl(repositoryUrl).equals(repository), "repositoryUrl манифеста не соответствует релизу");
+            require(RepositoryId.fromGithubUrl(repositoryUrl).normalizedKey().equals(repository.normalizedKey()), "repositoryUrl манифеста не соответствует релизу");
             require("windows".equalsIgnoreCase(requiredText(root, "platform")), "Манифест не предназначен для Windows");
             require("x64".equalsIgnoreCase(requiredText(root, "architecture")), "Поддерживается только x64");
             JsonNode installerNode = requiredObject(root, "installer");
@@ -44,10 +45,13 @@ public final class ManifestValidator {
                     .orElseThrow(() -> invalid("assetName манифеста отсутствует в текущем релизе"));
             require(asset.packageType() == (type == PackageType.INNO ? PackageType.EXE : type), "Тип файла не соответствует installer.type");
             String sha256AssetName = optionalText(installerNode, "sha256AssetName");
-            if (type == PackageType.INNO) require(sha256AssetName != null, "Для Inno Setup требуется SHA-256 asset");
+            require(sha256AssetName != null, "Для managed-пакета требуется SHA-256 asset");
             if (sha256AssetName != null) require(release.assets().stream().anyMatch(candidate -> candidate.name().equals(sha256AssetName)), "SHA-256 asset отсутствует в текущем релизе");
             List<String> silentArgs = strings(installerNode.path("silentArgs"));
-            if (type == PackageType.INNO) require(silentArgs.stream().allMatch(INNO_ARGUMENTS::contains), "Манифест содержит недопустимый аргумент Inno Setup");
+            if (type == PackageType.INNO) {
+                require(silentArgs.stream().allMatch(INNO_ARGUMENTS::contains), "Манифест содержит недопустимый аргумент Inno Setup");
+                require(silentArgs.containsAll(REQUIRED_INNO_ARGUMENTS), "Манифест Inno Setup не содержит обязательные безопасные аргументы");
+            }
             String desktopShortcutTask = optionalText(installerNode, "desktopShortcutTask");
             if (desktopShortcutTask != null) {
                 require(type == PackageType.INNO, "desktopShortcutTask поддерживается только для Inno Setup");
@@ -57,6 +61,12 @@ public final class ManifestValidator {
             if (root.has("detection")) {
                 JsonNode detectionNode = requiredObject(root, "detection");
                 detection = new AppFleetManifest.Detection(requiredText(detectionNode, "registryKey"), requiredText(detectionNode, "versionValue"), requiredText(detectionNode, "executableValue"));
+            }
+            if (type == PackageType.INNO) {
+                require(detection != null, "Для Inno Setup требуется detection");
+                String expectedKey = "HKCU\\Software\\PashaApps\\" + appId;
+                require(expectedKey.equalsIgnoreCase(detection.registryKey()) && "Version".equals(detection.versionValue()) && "Executable".equals(detection.executableValue()),
+                        "Inno Setup должен использовать стандартный HKCU detection контракт AppFleet");
             }
             List<String> processNames = strings(root.path("processNames"));
             String minimum = optionalText(root, "minimumAppFleetVersion");

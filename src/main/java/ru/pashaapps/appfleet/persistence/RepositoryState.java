@@ -12,7 +12,8 @@ public record RepositoryState(int schemaVersion, String owner, String repository
                               String selectedPackageType, String selectedArchitecture, Set<String> selectionTokens,
                               String installedVersion, Long installedAssetId, String installedPackageType,
                               String installLocation, String executable, Set<String> processNames,
-                              String releaseEtag, Instant lastCheckedAt, String lastCheckResult) {
+                              String releaseEtag, Instant lastCheckedAt, String lastCheckResult,
+                              Long exactSelectionReleaseId, Long exactSelectionAssetId) {
     public RepositoryState {
         if (schemaVersion != 1) throw new IllegalArgumentException("Неподдерживаемая версия записи репозитория");
         RepositoryId id = new RepositoryId(owner, repository);
@@ -26,8 +27,22 @@ public record RepositoryState(int schemaVersion, String owner, String repository
         if ((installLocation == null) != (executable == null)) {
             throw new IllegalArgumentException("Неполные сведения об установленном приложении");
         }
+        if ((exactSelectionReleaseId == null) != (exactSelectionAssetId == null)) {
+            throw new IllegalArgumentException("Неполный точный выбор файла релиза");
+        }
         selectionTokens = selectionTokens == null ? Set.of() : Set.copyOf(selectionTokens);
         processNames = processNames == null ? Set.of() : Set.copyOf(processNames);
+    }
+
+    /** Compatibility constructor for schema-1 state written before exact current-release selection existed. */
+    public RepositoryState(int schemaVersion, String owner, String repository, String canonicalUrl,
+                           String selectedPackageType, String selectedArchitecture, Set<String> selectionTokens,
+                           String installedVersion, Long installedAssetId, String installedPackageType,
+                           String installLocation, String executable, Set<String> processNames,
+                           String releaseEtag, Instant lastCheckedAt, String lastCheckResult) {
+        this(schemaVersion, owner, repository, canonicalUrl, selectedPackageType, selectedArchitecture, selectionTokens,
+                installedVersion, installedAssetId, installedPackageType, installLocation, executable, processNames,
+                releaseEtag, lastCheckedAt, lastCheckResult, null, null);
     }
 
     private static <E extends Enum<E>> void validateEnum(String value, Class<E> enumType, String field) {

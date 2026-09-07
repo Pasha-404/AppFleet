@@ -22,6 +22,7 @@ import java.util.Comparator;
 public final class GithubApiClient {
     public static final URI DEFAULT_BASE_URI = URI.create("https://api.github.com/");
     private static final int TRANSIENT_REQUEST_ATTEMPTS = 3;
+    private static final int MAX_RELEASE_PAGES = 20;
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(20);
     private static final Duration INITIAL_RETRY_DELAY = Duration.ofMillis(250);
     private final HttpClient client;
@@ -47,11 +48,19 @@ public final class GithubApiClient {
     }
 
     public GithubResponse<List<GithubRelease>> listReleases(RepositoryId repository, String etag) {
-        GithubResponse<JsonNode> response = get("repos/" + repository.owner() + "/" + repository.repository() + "/releases?per_page=100", etag);
+        String endpoint = "repos/" + repository.owner() + "/" + repository.repository() + "/releases?per_page=100&page=";
+        GithubResponse<JsonNode> response = get(endpoint + "1", etag);
         if (response.notModified()) return GithubResponse.notModified(response.etag());
         if (!response.body().isArray()) throw new GithubApiException("GitHub вернул некорректный список релизов", 200, null);
         List<GithubRelease> releases = new ArrayList<>();
         for (JsonNode release : response.body()) releases.add(toRelease(release));
+        // The endpoint is paginated. If the newest page is all drafts/prereleases, keep looking
+        // until a stable release is found or the finite public release list ends.
+        for (int page = 2; page <= MAX_RELEASE_PAGES && releases.size() == (page - 1) * 100 && releases.stream().noneMatch(GithubRelease::isStable); page++) {
+            GithubResponse<JsonNode> next = get(endpoint + page, null);
+            if (!next.body().isArray()) throw new GithubApiException("GitHub вернул некорректный список релизов", 200, null);
+            for (JsonNode release : next.body()) releases.add(toRelease(release));
+        }
         return GithubResponse.success(List.copyOf(releases), response.etag());
     }
 
@@ -108,16 +117,27 @@ public final class GithubApiClient {
     }
 
     private GithubApiException apiFailure(HttpResponse<String> response) {
-        Instant retryAt = response.headers().firstValue("X-RateLimit-Reset").flatMap(value -> {
+        Instant resetAt = response.headers().firstValue("X-RateLimit-Reset").flatMap(value -> {
             try { return Optional.of(Instant.ofEpochSecond(Long.parseLong(value))); } catch (NumberFormatException ignored) { return Optional.empty(); }
         }).orElse(null);
+        Instant retryAfter = response.headers().firstValue("Retry-After").flatMap(value -> {
+            try { return Optional.of(Instant.now().plusSeconds(Long.parseLong(value))); } catch (NumberFormatException ignored) { return Optional.empty(); }
+        }).orElse(null);
+        boolean exhausted = "0".equals(response.headers().firstValue("X-RateLimit-Remaining").orElse(null));
+        String body = response.body() == null ? "" : response.body().toLowerCase(java.util.Locale.ROOT);
+        boolean secondaryLimit = body.contains("secondary rate limit") || body.contains("rate limit");
+        boolean rateLimited = (response.statusCode() == 403 || response.statusCode() == 429)
+                && (retryAfter != null || exhausted || secondaryLimit || (response.statusCode() == 429 && resetAt != null));
+        Instant retryAt = retryAfter != null ? retryAfter : (exhausted || response.statusCode() == 429 && resetAt != null) ? resetAt : secondaryLimit ? Instant.now().plusSeconds(60) : null;
         String message = switch (response.statusCode()) {
             case 404 -> "Репозиторий не существует или не является публичным";
-            case 403, 429 -> retryAt == null ? "GitHub временно ограничил запросы" : "GitHub временно ограничил запросы до " + retryAt;
+            case 403, 429 -> rateLimited ? retryAt == null ? "GitHub временно ограничил запросы" : "GitHub временно ограничил запросы до " + retryAt : "GitHub отказал в доступе к репозиторию";
             case 500, 502, 503, 504 -> "GitHub временно недоступен";
             default -> "GitHub вернул ошибку HTTP " + response.statusCode();
         };
-        return new GithubApiException(message, response.statusCode(), retryAt);
+        GithubApiException.Kind kind = rateLimited ? GithubApiException.Kind.RATE_LIMIT
+                : response.statusCode() >= 500 ? GithubApiException.Kind.TRANSIENT : GithubApiException.Kind.PERMANENT;
+        return new GithubApiException(message, response.statusCode(), retryAt, kind);
     }
 
     private static GithubRelease toRelease(JsonNode node) {

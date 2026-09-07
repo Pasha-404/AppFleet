@@ -32,6 +32,24 @@ class ManifestValidatorTest {
         String invalid = new String(resource("fixtures/sortit-manifest-v1.5.0.json"), StandardCharsets.UTF_8).replace("SortIt-Setup-1.5.0-x64.exe\"", "Unknown.exe\"");
         assertThrows(IllegalArgumentException.class, () -> new ManifestValidator(AppFleetObjectMapper.create()).validate(invalid.getBytes(StandardCharsets.UTF_8), RepositoryId.fromGithubUrl("https://github.com/Pasha-404/sortit"), fixtureRelease()));
     }
+    @Test void acceptsRepositoryUrlWithDifferentCase() throws IOException {
+        String differentlyCased = new String(resource("fixtures/sortit-manifest-v1.5.0.json"), StandardCharsets.UTF_8)
+                .replace("https://github.com/Pasha-404/sortit", "https://github.com/pasha-404/SORTIT");
+
+        assertDoesNotThrow(() -> new ManifestValidator(AppFleetObjectMapper.create()).validate(differentlyCased.getBytes(StandardCharsets.UTF_8), RepositoryId.fromGithubUrl("https://github.com/Pasha-404/sortit"), fixtureRelease()));
+    }
+    @Test void rejectsInnoManifestWithoutTheFullSafeSilentContract() throws IOException {
+        String missingNoRestart = new String(resource("fixtures/sortit-manifest-v1.5.0.json"), StandardCharsets.UTF_8)
+                .replace(", \"/NORESTART\"", "");
+
+        assertThrows(IllegalArgumentException.class, () -> new ManifestValidator(AppFleetObjectMapper.create()).validate(missingNoRestart.getBytes(StandardCharsets.UTF_8), RepositoryId.fromGithubUrl("https://github.com/Pasha-404/sortit"), fixtureRelease()));
+    }
+    @Test void rejectsInnoManifestWithAnUnsupportedRegistryContract() throws IOException {
+        String wrongRegistry = new String(resource("fixtures/sortit-manifest-v1.5.0.json"), StandardCharsets.UTF_8)
+                .replace("\"versionValue\": \"Version\"", "\"versionValue\": \"OtherVersion\"");
+
+        assertThrows(IllegalArgumentException.class, () -> new ManifestValidator(AppFleetObjectMapper.create()).validate(wrongRegistry.getBytes(StandardCharsets.UTF_8), RepositoryId.fromGithubUrl("https://github.com/Pasha-404/sortit"), fixtureRelease()));
+    }
     private static byte[] resource(String name) throws IOException { try (var input = ManifestValidatorTest.class.getClassLoader().getResourceAsStream(name)) { return input.readAllBytes(); } }
     private static GithubRelease fixtureRelease() { return new GithubRelease(264734621, "v1.5.0", "SortIt", "", false, false, Instant.parse("2026-08-29T13:07:14Z"), URI.create("https://github.com/Pasha-404/sortit/releases/tag/v1.5.0"), List.of(new ReleaseAsset(535231686, "SortIt-Setup-1.5.0-x64.exe", 1, URI.create("https://github.com/Pasha-404/sortit/releases/download/v1.5.0/SortIt-Setup-1.5.0-x64.exe"), ""), new ReleaseAsset(535231685, "SortIt-Setup-1.5.0-x64.exe.sha256", 1, URI.create("https://github.com/Pasha-404/sortit/releases/download/v1.5.0/SortIt-Setup-1.5.0-x64.exe.sha256"), ""))); }
 }

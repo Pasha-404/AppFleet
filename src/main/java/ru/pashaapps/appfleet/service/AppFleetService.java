@@ -31,12 +31,13 @@ public final class AppFleetService implements AutoCloseable {
     private final AtomicJsonStore<UserSettings> settingsStore;
     private final AtomicJsonStore<ReleaseCache> releaseCacheStore;
     private final OperationJournal journal;
-    private final WindowsRegistryDetector registry;
+    private final InstallationDetector registry;
     private final AssetSelector selector = new AssetSelector();
     private final ExecutorService worker = Executors.newSingleThreadExecutor(Thread.ofVirtual().name("appfleet-worker-", 0).factory());
     private final Map<String, ApplicationSnapshot> snapshots = new LinkedHashMap<>();
     private final Map<String, ReleaseCache.Entry> releaseCache = new LinkedHashMap<>();
     private final Map<String, Instant> retryAfter = new HashMap<>();
+    private Instant sharedGithubRetryAfter;
     private PendingInstallation pendingInstallation;
     private RepositoriesDocument repositories;
     private UserSettings settings;
@@ -50,14 +51,19 @@ public final class AppFleetService implements AutoCloseable {
     }
 
     private AppFleetService(AppPaths paths, ObjectMapper mapper, String version, HttpClient http, OperationCoordinator operations) {
-        this(paths, mapper, version, new GithubApiClient(http, mapper, version), new GithubAssetDownloader(http, "AppFleet/" + version), operations);
+        this(paths, mapper, version, new GithubApiClient(http, mapper, version), new GithubAssetDownloader(http, "AppFleet/" + version), new WindowsRegistryDetector(), operations);
     }
 
     AppFleetService(AppPaths paths, ObjectMapper mapper, String version, GithubApiClient github, GithubAssetDownloader downloader) {
-        this(paths, mapper, version, github, downloader, new OperationCoordinator());
+        this(paths, mapper, version, github, downloader, new WindowsRegistryDetector(), new OperationCoordinator());
     }
 
     AppFleetService(AppPaths paths, ObjectMapper mapper, String version, GithubApiClient github, GithubAssetDownloader downloader, OperationCoordinator operations) {
+        this(paths, mapper, version, github, downloader, new WindowsRegistryDetector(), operations);
+    }
+
+    AppFleetService(AppPaths paths, ObjectMapper mapper, String version, GithubApiClient github, GithubAssetDownloader downloader,
+                    InstallationDetector registry, OperationCoordinator operations) {
         this.paths = paths;
         this.github = github;
         this.downloader = downloader;
@@ -68,7 +74,7 @@ public final class AppFleetService implements AutoCloseable {
         this.settingsStore = new AtomicJsonStore<>(mapper, UserSettings.class, paths.settingsFile());
         this.releaseCacheStore = new AtomicJsonStore<>(mapper, ReleaseCache.class, paths.cacheDirectory().resolve("release-cache.json"));
         this.journal = new OperationJournal(new AtomicJsonStore<>(mapper, OperationsDocument.class, paths.operationsFile()));
-        this.registry = new WindowsRegistryDetector();
+        this.registry = Objects.requireNonNull(registry, "registry");
         this.repositories = repositoriesStore.read().orElseGet(RepositoriesDocument::empty);
         this.settings = settingsStore.read().orElseGet(UserSettings::defaults).normalized();
         releaseCacheStore.read().orElseGet(ReleaseCache::empty).entries().forEach(entry -> releaseCache.put(entry.repositoryKey(), entry));
@@ -129,8 +135,9 @@ public final class AppFleetService implements AutoCloseable {
     public CompletableFuture<ApplicationSnapshot> chooseAsset(RepositoryId id, ReleaseAsset selected) {
         return CompletableFuture.supplyAsync(() -> {
             ApplicationSnapshot current = requireSnapshot(id);
+            if (current.manifest() != null) throw new IllegalStateException("Файл релиза задан проверенным appfleet-manifest.json и не может быть заменён вручную");
             if (current.release() == null || selector.eligibleAssets(current.release()).stream().noneMatch(asset -> asset.id() == selected.id())) throw new IllegalArgumentException("Выбранный файл не является подходящим Windows x64 пакетом текущего релиза");
-            RepositoryState state = withRule(current.persisted(), AssetSelectionRule.from(selected));
+            RepositoryState state = withSelection(current.persisted(), AssetSelectionRule.from(selected), current.release().id(), selected.id());
             synchronizedUpdateRepositories(repositories.repositories().stream().map(existing -> same(existing, id) ? state : existing).toList());
             ApplicationSnapshot refreshed = check(state);
             synchronized (this) { snapshots.put(id.normalizedKey(), refreshed); }
@@ -212,7 +219,16 @@ public final class AppFleetService implements AutoCloseable {
             GithubResponse<List<GithubRelease>> response = github.listReleases(id, canReuseRetainedSnapshot ? original.releaseEtag() : null);
             if (response.notModified()) {
                 ApplicationSnapshot retained = snapshots.get(id.normalizedKey());
-                if (retained != null) return retained;
+                if (retained != null && retained.release() != null) {
+                    RepositoryState state = withCheck(original, response.etag() == null ? original.releaseEtag() : response.etag(), "Успешно (GitHub: без изменений)");
+                    AssetSelection selection = retained.manifest() == null
+                            ? selector.select(retained.release(), toRule(state), state.exactSelectionReleaseId(), state.exactSelectionAssetId())
+                            : new AssetSelection.Selected(retained.selectedAsset(), true);
+                    ReleaseAsset asset = selection instanceof AssetSelection.Selected selected ? selected.asset() : null;
+                    List<ReleaseAsset> candidates = selection instanceof AssetSelection.NeedsChoice choice ? choice.candidates() : List.of();
+                    return snapshot(id, state, statusFor(state, retained.release(), asset, candidates, retained.manifest()), retained.release(), asset, candidates,
+                            retained.manifest(), messageFor(selection, statusFor(state, retained.release(), asset, candidates, retained.manifest())));
+                }
                 ApplicationSnapshot cached = cachedSnapshot(id, original, "GitHub подтвердил, что данные не изменились; показаны сохранённые сведения");
                 if (cached != null) return cached;
                 return new ApplicationSnapshot(id, original, AppStatus.CHECK_ERROR, id.repository(), original.installedVersion(), null, null, List.of(), null, "Данные релиза не сохранены, нужна повторная проверка");
@@ -226,18 +242,32 @@ public final class AppFleetService implements AutoCloseable {
             }
             GithubRelease release = stable.get();
             ManifestResult manifest = readManifestIfPresent(id, release);
-            AssetSelection selection = manifest.manifest == null ? selector.select(release, toRule(state)) : manifest.selection;
+            if (manifest.transientFailure()) {
+                ReleaseCache.Entry retainedManifest;
+                synchronized (this) { retainedManifest = releaseCache.get(id.normalizedKey()); }
+                if (retainedManifest != null && retainedManifest.release().id() == release.id() && retainedManifest.manifest() != null) {
+                    AppFleetManifest knownManifest = retainedManifest.manifest();
+                    ReleaseAsset selected = release.assets().stream().filter(candidate -> candidate.name().equals(knownManifest.installer().assetName())).findFirst().orElse(null);
+                    if (selected != null) manifest = new ManifestResult(knownManifest, new AssetSelection.Selected(selected, true), "Манифест временно недоступен; использован ранее проверенный", true);
+                }
+            }
+            AssetSelection selection = manifest.manifest == null
+                    ? selector.select(release, toRule(state), state.exactSelectionReleaseId(), state.exactSelectionAssetId())
+                    : manifest.selection;
             ReleaseAsset asset = selection instanceof AssetSelection.Selected selected ? selected.asset() : null;
             List<ReleaseAsset> candidates = selection instanceof AssetSelection.NeedsChoice choice ? choice.candidates() : List.of();
             AppStatus status = statusFor(state, release, asset, candidates, manifest.manifest);
-            String message = manifest.failure == null ? messageFor(selection, status) : "Манифест релиза не принят: " + manifest.failure + ". Выполнен анализ файлов.";
+            String message = manifest.failure == null ? messageFor(selection, status)
+                    : manifest.transientFailure ? manifest.failure + ". Выполнен анализ файлов без нового manifest." : "Манифест релиза не принят: " + manifest.failure + ". Выполнен анализ файлов.";
             ApplicationSnapshot checked = snapshot(id, state, status, release, asset, candidates, manifest.manifest, message);
-            rememberRelease(id, release, manifest.manifest);
+            if (!manifest.transientFailure()) rememberRelease(id, release, manifest.manifest);
             journal.write(id.slug(), "Проверка репозитория", "Успешно", message, null);
             return checked;
         } catch (Exception failure) {
             if (failure instanceof GithubApiException githubFailure) {
-                githubFailure.retryAt().filter(time -> time.isAfter(Instant.now())).ifPresent(time -> rememberRetryAfter(id, time));
+                if (githubFailure.kind() == GithubApiException.Kind.RATE_LIMIT) {
+                    githubFailure.retryAt().filter(time -> time.isAfter(Instant.now())).ifPresent(time -> rememberRetryAfter(id, time));
+                }
                 ApplicationSnapshot cached = cachedSnapshot(id, original, "Не удалось обновить сведения GitHub: " + failure.getMessage() + ". Показаны последние подтверждённые данные.");
                 if (cached != null) {
                     journal.write(id.slug(), "Проверка репозитория", "Предупреждение", cached.message(), failure);
@@ -251,13 +281,15 @@ public final class AppFleetService implements AutoCloseable {
     }
     private ManifestResult readManifestIfPresent(RepositoryId id, GithubRelease release) {
         Optional<ReleaseAsset> asset = release.assets().stream().filter(candidate -> candidate.name().equals("appfleet-manifest.json")).findFirst();
-        if (asset.isEmpty()) return new ManifestResult(null, null, null);
+        if (asset.isEmpty()) return new ManifestResult(null, null, null, false);
         try (OperationDirectory operation = OperationDirectory.create(paths.temporaryRoot(), "manifest-")) {
             DownloadedFile downloaded = downloader.download(asset.get().downloadUri(), operation.path(), "appfleet-manifest.json", CancellationToken.NEVER_CANCELLED, DownloadProgress.NONE);
             AppFleetManifest manifest = manifests.validate(Files.readAllBytes(downloaded.path()), id, release);
             ReleaseAsset selected = release.assets().stream().filter(candidate -> candidate.name().equals(manifest.installer().assetName())).findFirst().orElseThrow();
-            return new ManifestResult(manifest, new AssetSelection.Selected(selected, true), null);
-        } catch (Exception invalid) { return new ManifestResult(null, null, invalid.getMessage()); }
+            return new ManifestResult(manifest, new AssetSelection.Selected(selected, true), null, false);
+        } catch (IOException unavailable) {
+            return new ManifestResult(null, null, "Манифест временно недоступен: " + unavailable.getMessage(), true);
+        } catch (Exception invalid) { return new ManifestResult(null, null, invalid.getMessage(), false); }
     }
     private OperationResult beginInstall(InstallationPlan plan, CancellationToken cancellation, DownloadProgress progress, OperationProgress operationProgress, OperationCoordinator.Lease lease) {
         ApplicationSnapshot snapshot = plan.snapshot();
@@ -499,36 +531,53 @@ public final class AppFleetService implements AutoCloseable {
     }
     private AppStatus statusFor(RepositoryState state, GithubRelease release, ReleaseAsset asset, List<ReleaseAsset> candidates, AppFleetManifest manifest) {
         if (asset == null) return candidates.isEmpty() ? AppStatus.USER_ACTION_REQUIRED : AppStatus.ASSET_SELECTION_REQUIRED;
-        String installed = installedVersion(state, manifest);
+        String installed = state.installedVersion();
         if (installed == null || installed.isBlank()) return AppStatus.NOT_INSTALLED;
         Optional<SemVersion> knownInstalled = SemVersion.tryParse(installed);
         Optional<SemVersion> target = SemVersion.tryParse(release.tagName());
         if (knownInstalled.isPresent() && target.isPresent()) return target.get().compareTo(knownInstalled.get()) > 0 ? AppStatus.UPDATE_AVAILABLE : AppStatus.UP_TO_DATE;
         return installed.equals(release.tagName()) ? AppStatus.UP_TO_DATE : AppStatus.VERSION_UNKNOWN;
     }
-    private String installedVersion(RepositoryState state, AppFleetManifest manifest) {
-        if (manifest != null) try { return registry.findStandardApplication(manifest.appId()).map(InstalledApplication::version).orElse(state.installedVersion()); } catch (IOException ignored) { return state.installedVersion(); }
-        return state.installedVersion();
-    }
-    private RepositoryState withDetectedStandard(RepositoryState state, AppFleetManifest manifest) {
-        if (manifest == null) return state;
-        try {
-            return registry.findStandardApplication(manifest.appId()).map(application -> mergeDetectedStandard(state, application)).orElse(state);
-        } catch (IOException ignored) {
-            return state;
+    private LocalInstallationState reconcileLocalInstallation(RepositoryState state, AppFleetManifest manifest) {
+        if (manifest == null || manifest.detection() == null) {
+            if (state.executable() != null && !state.executable().isBlank()) {
+                try {
+                    if (!Files.isRegularFile(Path.of(state.executable()))) return LocalInstallationState.confirmed(clearInstalledMetadata(state));
+                } catch (RuntimeException malformed) {
+                    return LocalInstallationState.confirmed(clearInstalledMetadata(state));
+                }
+            }
+            return LocalInstallationState.confirmed(state);
         }
+        try {
+            return registry.findStandardApplication(manifest.appId())
+                    .map(application -> LocalInstallationState.confirmed(mergeDetectedStandard(state, application)))
+                    .orElseGet(() -> LocalInstallationState.confirmed(clearInstalledMetadata(state)));
+        } catch (IOException unreadable) {
+            return LocalInstallationState.unknown(state, "Не удалось подтвердить локальную установку: " + unreadable.getMessage());
+        }
+    }
+
+    private static RepositoryState clearInstalledMetadata(RepositoryState state) {
+        return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(),
+                state.selectedPackageType(), state.selectedArchitecture(), state.selectionTokens(), null, null, null,
+                null, null, Set.of(), state.releaseEtag(), state.lastCheckedAt(), state.lastCheckResult(),
+                state.exactSelectionReleaseId(), state.exactSelectionAssetId());
     }
     static RepositoryState mergeDetectedStandard(RepositoryState state, InstalledApplication application) {
         Set<String> processNames = state.processNames().isEmpty() && application.processName() != null && !application.processName().isBlank()
                 ? Set.of(application.processName()) : state.processNames();
         return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(), state.selectedPackageType(), state.selectedArchitecture(), state.selectionTokens(),
                 application.version(), state.installedAssetId(), state.installedPackageType(), application.installLocation().toString(), application.executable().toString(), processNames,
-                state.releaseEtag(), state.lastCheckedAt(), state.lastCheckResult());
+                state.releaseEtag(), state.lastCheckedAt(), state.lastCheckResult(), state.exactSelectionReleaseId(), state.exactSelectionAssetId());
     }
 
     private ApplicationSnapshot cachedSnapshotDuringCooldown(RepositoryId id, RepositoryState state) {
         Instant until;
-        synchronized (this) { until = retryAfter.get(id.normalizedKey()); }
+        synchronized (this) {
+            Instant repositoryUntil = retryAfter.get(id.normalizedKey());
+            until = latestFuture(repositoryUntil, sharedGithubRetryAfter);
+        }
         if (until == null || !until.isAfter(Instant.now())) return null;
         String message = "GitHub временно ограничил запросы до " + until + ". Показаны последние подтверждённые данные.";
         ApplicationSnapshot cached = cachedSnapshot(id, state, message);
@@ -536,7 +585,8 @@ public final class AppFleetService implements AutoCloseable {
             journal.write(id.slug(), "Проверка репозитория", "Предупреждение", message, null);
             return cached;
         }
-        return null;
+        return snapshot(id, withCheck(state, state.releaseEtag(), "Предупреждение: " + message), AppStatus.CHECK_ERROR, null, null, List.of(), null,
+                "GitHub временно ограничил запросы до " + until + ". Повторная проверка станет доступна после окончания ограничения.");
     }
 
     private ApplicationSnapshot cachedSnapshot(RepositoryId id, RepositoryState original, String message) {
@@ -546,7 +596,7 @@ public final class AppFleetService implements AutoCloseable {
         AppFleetManifest manifest = entry.manifest();
         AssetSelection selection;
         if (manifest == null) {
-            selection = selector.select(entry.release(), toRule(original));
+            selection = selector.select(entry.release(), toRule(original), original.exactSelectionReleaseId(), original.exactSelectionAssetId());
         } else {
             ReleaseAsset selected = entry.release().assets().stream().filter(asset -> asset.name().equals(manifest.installer().assetName())).findFirst().orElse(null);
             selection = selected == null ? new AssetSelection.None("Сохранённый manifest ссылается на отсутствующий файл") : new AssetSelection.Selected(selected, true);
@@ -573,24 +623,52 @@ public final class AppFleetService implements AutoCloseable {
     }
 
     private void rememberRetryAfter(RepositoryId id, Instant until) {
-        synchronized (this) { retryAfter.put(id.normalizedKey(), until); }
+        synchronized (this) {
+            retryAfter.put(id.normalizedKey(), until);
+            sharedGithubRetryAfter = latestFuture(sharedGithubRetryAfter, until);
+        }
     }
 
     private void clearRetryAfter(RepositoryId id) {
         synchronized (this) { retryAfter.remove(id.normalizedKey()); }
     }
 
+    private static Instant latestFuture(Instant first, Instant second) {
+        Instant now = Instant.now();
+        boolean firstActive = first != null && first.isAfter(now);
+        boolean secondActive = second != null && second.isAfter(now);
+        if (!firstActive) return secondActive ? second : null;
+        if (!secondActive) return first;
+        return first.isAfter(second) ? first : second;
+    }
+
     private ApplicationSnapshot snapshot(RepositoryId id, RepositoryState state, AppStatus status, GithubRelease release, ReleaseAsset asset, List<ReleaseAsset> candidates, AppFleetManifest manifest, String message) {
-        RepositoryState discovered = withDetectedStandard(state, manifest);
-        return new ApplicationSnapshot(id, discovered, status, manifest == null ? id.repository() : manifest.name(), installedVersion(discovered, manifest), release, asset, candidates, manifest, message);
+        LocalInstallationState local = reconcileLocalInstallation(state, manifest);
+        AppStatus effectiveStatus = status;
+        if (release != null && local.confirmed() && status != AppStatus.CHECK_ERROR && status != AppStatus.NO_RELEASES) {
+            effectiveStatus = statusFor(local.state(), release, asset, candidates, manifest);
+        } else if (!local.confirmed() && status != AppStatus.CHECK_ERROR && status != AppStatus.NO_RELEASES) {
+            effectiveStatus = AppStatus.VERSION_UNKNOWN;
+        }
+        String effectiveMessage = appendMessage(message, local.message());
+        return new ApplicationSnapshot(id, local.state(), effectiveStatus, manifest == null ? id.repository() : manifest.name(), local.state().installedVersion(), release, asset, candidates, manifest, effectiveMessage);
+    }
+    private static String appendMessage(String first, String second) {
+        if (second == null || second.isBlank()) return first;
+        return first == null || first.isBlank() ? second : first + "\n" + second;
     }
     private static String messageFor(AssetSelection selection, AppStatus status) { return switch (selection) { case AssetSelection.Selected selected -> selected.fromManifest() ? "Файл выбран по проверенному appfleet-manifest.json" : "Файл выбран автоматически; проверьте его перед установкой"; case AssetSelection.NeedsChoice ignored -> "Найдено несколько равнозначных файлов релиза"; case AssetSelection.None none -> none.reason(); }; }
     private synchronized ApplicationSnapshot requireSnapshot(RepositoryId id) { ApplicationSnapshot snapshot = snapshots.get(id.normalizedKey()); if (snapshot == null) throw new IllegalStateException("Сначала выполните проверку репозитория"); return snapshot; }
-    private static RepositoryState emptyState(RepositoryId id) { return new RepositoryState(1, id.owner(), id.repository(), id.canonicalUrl(), null, null, Set.of(), null, null, null, null, null, Set.of(), null, null, null); }
+    private static RepositoryState emptyState(RepositoryId id) { return new RepositoryState(1, id.owner(), id.repository(), id.canonicalUrl(), null, null, Set.of(), null, null, null, null, null, Set.of(), null, null, null, null, null); }
     private static boolean same(RepositoryState state, RepositoryId id) { return (state.owner() + "/" + state.repository()).equalsIgnoreCase(id.slug()); }
     private static AssetSelectionRule toRule(RepositoryState state) { if (state.selectedPackageType() == null || state.selectedArchitecture() == null) return null; try { return new AssetSelectionRule(PackageType.valueOf(state.selectedPackageType()), Architecture.valueOf(state.selectedArchitecture()), state.selectionTokens()); } catch (IllegalArgumentException invalid) { return null; } }
-    private static RepositoryState withRule(RepositoryState state, AssetSelectionRule rule) { return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(), rule.packageType().name(), rule.architecture().name(), rule.requiredTokens(), state.installedVersion(), state.installedAssetId(), state.installedPackageType(), state.installLocation(), state.executable(), state.processNames(), null, state.lastCheckedAt(), state.lastCheckResult()); }
-    private static RepositoryState withCheck(RepositoryState state, String etag, String result) { return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(), state.selectedPackageType(), state.selectedArchitecture(), state.selectionTokens(), state.installedVersion(), state.installedAssetId(), state.installedPackageType(), state.installLocation(), state.executable(), state.processNames(), etag, Instant.now(), result); }
+    private static RepositoryState withRule(RepositoryState state, AssetSelectionRule rule) { return withSelection(state, rule, null, null); }
+    private static RepositoryState withSelection(RepositoryState state, AssetSelectionRule rule, Long exactReleaseId, Long exactAssetId) {
+        return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(), rule.packageType().name(), rule.architecture().name(), rule.requiredTokens(),
+                state.installedVersion(), state.installedAssetId(), state.installedPackageType(), state.installLocation(), state.executable(), state.processNames(),
+                null, state.lastCheckedAt(), state.lastCheckResult(), exactReleaseId, exactAssetId);
+    }
+    private static RepositoryState withCheck(RepositoryState state, String etag, String result) { return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(), state.selectedPackageType(), state.selectedArchitecture(), state.selectionTokens(), state.installedVersion(), state.installedAssetId(), state.installedPackageType(), state.installLocation(), state.executable(), state.processNames(), etag, Instant.now(), result, state.exactSelectionReleaseId(), state.exactSelectionAssetId()); }
     private static RepositoryState withInstalled(RepositoryState state, ApplicationSnapshot snapshot, PackageType type,
                                                  Optional<InstalledApplication> detected, ManagedZipInstall managedZip) {
         if (managedZip != null) {
@@ -598,13 +676,13 @@ public final class AppFleetService implements AutoCloseable {
             return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(),
                     state.selectedPackageType(), state.selectedArchitecture(), state.selectionTokens(), snapshot.release().tagName(),
                     snapshot.selectedAsset().id(), type.name(), managedZip.workingDirectory().toString(), executable.toString(),
-                    Set.of(executable.getFileName().toString()), null, Instant.now(), "Установлено");
+                    Set.of(executable.getFileName().toString()), null, Instant.now(), "Установлено", state.exactSelectionReleaseId(), state.exactSelectionAssetId());
         }
         Set<String> names = snapshot.manifest() == null ? state.processNames() : Set.copyOf(snapshot.manifest().processNames());
         String version = detected.map(InstalledApplication::version).orElse(snapshot.release().tagName());
         String location = detected.map(application -> application.installLocation().toString()).orElse(state.installLocation());
         String executable = detected.map(application -> application.executable().toString()).orElse(state.executable());
-        return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(), state.selectedPackageType(), state.selectedArchitecture(), state.selectionTokens(), version, snapshot.selectedAsset().id(), type.name(), location, executable, names, null, Instant.now(), "Установлено");
+        return new RepositoryState(state.schemaVersion(), state.owner(), state.repository(), state.canonicalUrl(), state.selectedPackageType(), state.selectedArchitecture(), state.selectionTokens(), version, snapshot.selectedAsset().id(), type.name(), location, executable, names, null, Instant.now(), "Установлено", state.exactSelectionReleaseId(), state.exactSelectionAssetId());
     }
     private synchronized void synchronizedUpdateRepositories(List<RepositoryState> updated) { saveRepositories(updated); }
     private void saveRepositories(List<RepositoryState> updated) {
@@ -639,7 +717,11 @@ public final class AppFleetService implements AutoCloseable {
         if (pending != null) pending.lease().close();
         worker.shutdownNow();
     }
-    private record ManifestResult(AppFleetManifest manifest, AssetSelection selection, String failure) { }
+    private record ManifestResult(AppFleetManifest manifest, AssetSelection selection, String failure, boolean transientFailure) { }
+    private record LocalInstallationState(RepositoryState state, boolean confirmed, String message) {
+        private static LocalInstallationState confirmed(RepositoryState state) { return new LocalInstallationState(state, true, null); }
+        private static LocalInstallationState unknown(RepositoryState state, String message) { return new LocalInstallationState(state, false, message); }
+    }
     private record ProcessClosePreparation(List<RunningApplication> gracefullyClosed, List<RunningApplication> forceCloseProcesses) {
         private ProcessClosePreparation { gracefullyClosed = List.copyOf(gracefullyClosed); forceCloseProcesses = List.copyOf(forceCloseProcesses); }
         private static ProcessClosePreparation empty() { return new ProcessClosePreparation(List.of(), List.of()); }

@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
 import static org.junit.jupiter.api.Assertions.*;
 
 /** Integration test against prepared GitHub REST responses, never GitHub HTML. */
@@ -24,6 +25,8 @@ class GithubApiClientFixtureIntegrationTest {
     private GithubApiClient client;
     private final AtomicInteger temporaryFailures = new AtomicInteger();
     private Instant rateLimitReset;
+    private boolean paginatePastPrereleases;
+    private boolean notFoundWithRateHeaders;
     @BeforeEach void startServer() throws IOException {
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/repos/Pasha-404/sortit", this::repository);
@@ -56,8 +59,30 @@ class GithubApiClientFixtureIntegrationTest {
         assertEquals(rateLimitReset, failure.retryAt().orElseThrow());
     }
 
+    @Test void followsTheNextPageWhenTheFirstHundredReleasesArePrereleases() {
+        paginatePastPrereleases = true;
+
+        GithubResponse<List<ru.pashaapps.appfleet.domain.GithubRelease>> response = client.listReleases(RepositoryId.fromGithubUrl("https://github.com/Pasha-404/sortit"), null);
+
+        assertTrue(response.body().stream().anyMatch(release -> release.tagName().equals("v1.5.0")));
+    }
+
+    @Test void doesNotTurnAnOrdinaryNotFoundIntoARateLimitBecauseResetHeaderExists() {
+        notFoundWithRateHeaders = true;
+
+        GithubApiException failure = assertThrows(GithubApiException.class, () -> client.listReleases(RepositoryId.fromGithubUrl("https://github.com/Pasha-404/sortit"), null));
+
+        assertEquals(GithubApiException.Kind.PERMANENT, failure.kind());
+        assertTrue(failure.retryAt().isEmpty());
+    }
+
     private void repository(HttpExchange exchange) throws IOException { respond(exchange, 200, "{\"full_name\":\"Pasha-404/sortit\",\"private\":false,\"archived\":false}"); }
     private void releases(HttpExchange exchange) throws IOException {
+        if (notFoundWithRateHeaders) {
+            exchange.getResponseHeaders().add("X-RateLimit-Reset", Long.toString(Instant.now().plusSeconds(600).getEpochSecond()));
+            respond(exchange, 404, "{\"message\":\"Not Found\"}");
+            return;
+        }
         if (rateLimitReset != null) {
             exchange.getResponseHeaders().add("X-RateLimit-Reset", Long.toString(rateLimitReset.getEpochSecond()));
             respond(exchange, 429, "{\"message\":\"API rate limit exceeded\"}");
@@ -66,6 +91,14 @@ class GithubApiClientFixtureIntegrationTest {
         if (temporaryFailures.get() > 0 && temporaryFailures.getAndDecrement() > 0) {
             respond(exchange, 503, "{\"message\":\"Service unavailable\"}");
             return;
+        }
+        if (paginatePastPrereleases) {
+            String page = exchange.getRequestURI().getQuery();
+            if (page != null && page.matches(".*(?:^|&)page=1(?:&|$).*")) {
+                String prereleases = IntStream.range(0, 100).mapToObj(index -> "{\"id\":" + (1000 + index) + ",\"tag_name\":\"v9." + index + ".0\",\"name\":\"\",\"body\":\"\",\"draft\":false,\"prerelease\":true,\"published_at\":\"2026-08-31T10:00:00Z\",\"html_url\":\"https://github.com/Pasha-404/sortit/releases/tag/v9\",\"assets\":[]}").collect(java.util.stream.Collectors.joining(","));
+                respond(exchange, 200, "[" + prereleases + "]");
+                return;
+            }
         }
         if ("\"fixture-v1\"".equals(exchange.getRequestHeaders().getFirst("If-None-Match"))) { exchange.getResponseHeaders().add("ETag", "\"fixture-v1\""); exchange.sendResponseHeaders(304, -1); return; }
         respond(exchange, 200, "[" + new String(resource("fixtures/sortit-release-v1.5.0.json"), StandardCharsets.UTF_8) + "]");
