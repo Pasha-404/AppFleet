@@ -50,6 +50,12 @@ public final class AtomicJsonStore<T> {
         }
     }
 
+    /** Removes both current and recovery copies so a completed one-shot marker cannot be restored from backup. */
+    public void delete() throws IOException {
+        Files.deleteIfExists(file);
+        Files.deleteIfExists(backupPath());
+    }
+
     private Optional<T> readOne(Path candidate) {
         if (!Files.isRegularFile(candidate)) return Optional.empty();
         try { return Optional.of(mapper.readValue(candidate.toFile(), type)); }
@@ -57,4 +63,3 @@ public final class AtomicJsonStore<T> {
     }
     private Path backupPath() { return file.resolveSibling(file.getFileName() + ".bak"); }
 }
-

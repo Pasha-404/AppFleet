@@ -218,7 +218,7 @@ public final class MainWindow {
         Alert dialog = new Alert(Alert.AlertType.CONFIRMATION); dialog.initOwner(stage); dialog.setTitle("Обновление AppFleet"); dialog.setHeaderText("Доступна версия " + offer.manifest().version()); dialog.setContentText("Файл: " + offer.installer().name() + " (" + humanSize(offer.installer().size()) + ")\n\n" + offer.release().body() + "\n\nИсточник: " + offer.release().htmlUrl());
         if (dialog.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) { service.record("AppFleet", "Самообновление", "Отменено", "Пользователь отказался от обновления", null); refreshApplications(); return; }
         AtomicBoolean cancelled = new AtomicBoolean(); Stage progress = progressStage("Скачивание обновления AppFleet", cancelled);
-        java.util.concurrent.CompletableFuture.supplyAsync(() -> { try { return selfUpdate.install(offer, cancelled::get, updateProgress(progress)); } catch (Exception error) { throw new java.util.concurrent.CompletionException(error); } }, startupWorker).whenComplete((started, failure) -> Platform.runLater(() -> { progress.close(); if (failure != null) { service.record("AppFleet", "Самообновление", "Ошибка", "Не удалось запустить обновление", unwrap(failure)); showError("Обновление AppFleet не запущено", unwrap(failure).getMessage()); refreshApplications(); } else { service.record("AppFleet", "Самообновление", "Запущено", "Внешний установщик запущен; AppFleet будет перезапущен", null); Platform.exit(); } }));
+        java.util.concurrent.CompletableFuture.supplyAsync(() -> { try { return selfUpdate.install(offer, cancelled::get, updateProgress(progress), operationProgress(progress)); } catch (Exception error) { throw new java.util.concurrent.CompletionException(error); } }, startupWorker).whenComplete((started, failure) -> Platform.runLater(() -> { progress.close(); if (failure != null) { service.record("AppFleet", "Самообновление", "Ошибка", "Не удалось запустить обновление", unwrap(failure)); showError("Обновление AppFleet не запущено", unwrap(failure).getMessage()); refreshApplications(); } else { service.record("AppFleet", "Самообновление", "Запущено", "Внешний установщик запущен; AppFleet будет перезапущен", null); Platform.exit(); } }));
     }
     private void refreshApplications() {
         statusLine.setText("Проверка репозиториев…");
@@ -233,17 +233,62 @@ public final class MainWindow {
         Dialog<ReleaseAsset> dialog = new Dialog<>(); dialog.initOwner(stage); dialog.setTitle("Выберите файл релиза"); dialog.setHeaderText(snapshot.repository().slug()); dialog.getDialogPane().setContent(list); ButtonType choose = new ButtonType("Выбрать", ButtonBar.ButtonData.OK_DONE); dialog.getDialogPane().getButtonTypes().addAll(choose, ButtonType.CANCEL); dialog.setResultConverter(button -> button == choose ? list.getSelectionModel().getSelectedItem() : null); dialog.showAndWait().ifPresent(asset -> service.chooseAsset(snapshot.repository(), asset).whenComplete((updated, failure) -> Platform.runLater(() -> { if (failure != null) showError("Не удалось сохранить выбор", unwrap(failure).getMessage()); else applications.setAll(service.currentSnapshots()); })));
     }
     private void removeRepository(ApplicationSnapshot snapshot) { Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, "Приложение будет удалено только из списка AppFleet. Установленная программа останется в Windows.", ButtonType.OK, ButtonType.CANCEL); confirm.initOwner(stage); confirm.setHeaderText("Удалить " + snapshot.repository().slug() + " из списка?"); if (confirm.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) service.removeRepository(snapshot.repository()).whenComplete((nothing, failure) -> Platform.runLater(() -> { if (failure != null) showError("Не удалось удалить запись", unwrap(failure).getMessage()); else applications.setAll(service.currentSnapshots()); })); }
-    private void actOn(ApplicationSnapshot snapshot) { if (snapshot.status() == AppStatus.CHECK_ERROR) { refreshApplications(); return; } OperationPreview preview; try { preview = service.preview(snapshot.repository()); } catch (Exception failure) { showError("Операция недоступна", failure.getMessage()); return; } showOperationConfirmation(preview).ifPresent(request -> runOperation(snapshot, request)); }
-    private void runOperation(ApplicationSnapshot snapshot, OperationRequest request) {
+    private void actOn(ApplicationSnapshot snapshot) {
+        if (snapshot.status() == AppStatus.CHECK_ERROR) {
+            refreshApplications();
+            return;
+        }
+        if (isAppFleetRepository(snapshot)) {
+            checkSelfUpdateFromCard();
+            return;
+        }
+        OperationPreview preview;
+        try {
+            preview = service.preview(snapshot.repository());
+        } catch (Exception failure) {
+            showError("Операция недоступна", failure.getMessage());
+            return;
+        }
+        showOperationConfirmation(preview).ifPresent(request -> prepareAndRun(snapshot, request));
+    }
+
+    private boolean isAppFleetRepository(ApplicationSnapshot snapshot) {
+        return snapshot.repository().normalizedKey().equals(RepositoryId.fromGithubUrl(build.repositoryUrl()).normalizedKey());
+    }
+
+    private void checkSelfUpdateFromCard() {
+        selfUpdate.checkAsync(startupWorker).whenComplete((offer, failure) -> Platform.runLater(() -> {
+            if (failure != null) {
+                showError("Не удалось проверить обновление AppFleet", unwrap(failure).getMessage());
+                return;
+            }
+            if (offer.isEmpty()) {
+                showInfo("AppFleet актуален", "Для запущенной версии обновлений не найдено.");
+                refreshApplications();
+                return;
+            }
+            confirmSelfUpdate(offer.get());
+        }));
+    }
+
+    private void prepareAndRun(ApplicationSnapshot snapshot, OperationRequest request) {
+        try {
+            runOperation(service.prepareInstallation(snapshot.repository(), request));
+        } catch (Exception failure) {
+            showError("Операция недоступна", failure.getMessage());
+        }
+    }
+
+    private void runOperation(InstallationPlan plan) {
         AtomicBoolean cancelled = new AtomicBoolean(); Stage progress = progressStage("Скачивание и установка", cancelled);
-        service.installOrUpdate(snapshot.repository(), request, cancelled::get, updateProgress(progress)).whenComplete((result, failure) -> Platform.runLater(() -> {
+        service.installOrUpdate(plan, cancelled::get, updateProgress(progress), operationProgress(progress)).whenComplete((result, failure) -> Platform.runLater(() -> {
             progress.close();
             if (failure != null) { showError("Операция завершилась ошибкой", unwrap(failure).getMessage()); return; }
             applications.setAll(service.currentSnapshots());
             if (!result.successful() && result.message().contains("требуется отдельное подтверждение")) {
                 Alert force = new Alert(Alert.AlertType.CONFIRMATION, "Штатное закрытие приложения не удалось. Разрешить принудительно завершить только этот ранее обнаруженный процесс и продолжить установку?", ButtonType.OK, ButtonType.CANCEL);
                 force.initOwner(stage); force.setHeaderText("Требуется отдельное подтверждение");
-                if (force.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) runOperation(snapshot, new OperationRequest(true, true, true));
+                if (force.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) prepareAndRun(plan.snapshot(), new OperationRequest(true, true, true));
                 return;
             }
             Alert outcome = new Alert(result.successful() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR, result.message(), ButtonType.OK); outcome.initOwner(stage); outcome.setHeaderText(result.successful() ? "Операция завершена" : "Операция не выполнена"); outcome.showAndWait();
@@ -258,8 +303,9 @@ public final class MainWindow {
         CheckBox close = new CheckBox("Закрыть запущенное приложение автоматически, если оно обнаружено"); close.setWrapText(true);
         VBox content = new VBox(12, details, new Separator(), close); content.setPrefWidth(600); dialog.getDialogPane().setContent(content); ButtonType execute = new ButtonType(preview.currentVersion() == null ? "Установить" : "Обновить", ButtonBar.ButtonData.OK_DONE); dialog.getDialogPane().getButtonTypes().addAll(execute, ButtonType.CANCEL); dialog.setResultConverter(button -> button == execute ? new OperationRequest(true, close.isSelected(), false) : OperationRequest.cancelled()); return dialog.showAndWait().filter(OperationRequest::confirmed);
     }
-    private Stage progressStage(String title, AtomicBoolean cancelled) { Stage popup = new Stage(); popup.initOwner(stage); popup.initModality(Modality.WINDOW_MODAL); popup.setTitle(title); ProgressBar bar = new ProgressBar(ProgressIndicator.INDETERMINATE_PROGRESS); bar.setPrefWidth(330); Label label = new Label("Подготовка…"); Button cancel = new Button("Отмена"); cancel.setOnAction(event -> { cancelled.set(true); cancel.setDisable(true); label.setText("Отмена…"); }); VBox box = new VBox(12, label, bar, cancel); box.setPadding(new Insets(20)); box.setAlignment(Pos.CENTER); popup.setScene(new javafx.scene.Scene(box)); popup.setResizable(false); popup.show(); popup.getProperties().put("bar", bar); popup.getProperties().put("label", label); return popup; }
+    private Stage progressStage(String title, AtomicBoolean cancelled) { Stage popup = new Stage(); popup.initOwner(stage); popup.initModality(Modality.WINDOW_MODAL); popup.setTitle(title); ProgressBar bar = new ProgressBar(ProgressIndicator.INDETERMINATE_PROGRESS); bar.setPrefWidth(330); Label label = new Label("Подготовка…"); Button cancel = new Button("Отмена"); cancel.setOnAction(event -> { cancelled.set(true); cancel.setDisable(true); label.setText("Отмена…"); }); VBox box = new VBox(12, label, bar, cancel); box.setPadding(new Insets(20)); box.setAlignment(Pos.CENTER); popup.setScene(new javafx.scene.Scene(box)); popup.setResizable(false); popup.show(); popup.getProperties().put("bar", bar); popup.getProperties().put("label", label); popup.getProperties().put("cancel", cancel); return popup; }
     private DownloadProgress updateProgress(Stage popup) { return (received, total) -> Platform.runLater(() -> { ProgressBar bar = (ProgressBar) popup.getProperties().get("bar"); Label label = (Label) popup.getProperties().get("label"); bar.setProgress(total <= 0 ? ProgressIndicator.INDETERMINATE_PROGRESS : (double) received / total); label.setText(total <= 0 ? humanSize(received) + " скачано" : humanSize(received) + " из " + humanSize(total)); }); }
+    private OperationProgress operationProgress(Stage popup) { return phase -> Platform.runLater(() -> { Label label = (Label) popup.getProperties().get("label"); Button cancel = (Button) popup.getProperties().get("cancel"); if (phase != OperationPhase.FINISHED) label.setText(phase.display()); cancel.setDisable(!phase.cancellable() || cancel.isDisable()); }); }
     private void refreshJournal() { journalTable.setItems(FXCollections.observableArrayList(service.journalEntries())); }
     private void showTechnicalDetails(OperationEntry entry) { Alert detail = new Alert(Alert.AlertType.INFORMATION); detail.initOwner(stage); detail.setTitle("Технические подробности"); detail.setHeaderText(entry.operation() + " — " + entry.result()); TextArea area = new TextArea(entry.technicalDetails().isBlank() ? entry.message() : entry.technicalDetails()); area.setEditable(false); area.setWrapText(false); area.setPrefColumnCount(90); area.setPrefRowCount(20); detail.getDialogPane().setContent(area); detail.showAndWait(); }
     private static List<ReleaseAsset> assetCandidates(ApplicationSnapshot snapshot) {
@@ -269,6 +315,7 @@ public final class MainWindow {
     }
     private void saveSettings(UserSettings settings) { try { service.saveSettings(settings); } catch (Exception failure) { showError("Не удалось сохранить настройки", failure.getMessage()); } }
     private void showError(String title, String message) { Alert alert = new Alert(Alert.AlertType.ERROR, message == null ? "Неизвестная ошибка" : message, ButtonType.OK); alert.initOwner(stage); alert.setHeaderText(title); alert.showAndWait(); }
+    private void showInfo(String title, String message) { Alert alert = new Alert(Alert.AlertType.INFORMATION, message, ButtonType.OK); alert.initOwner(stage); alert.setHeaderText(title); alert.showAndWait(); }
     private static String emptyToDash(String value) { return value == null || value.isBlank() ? "Не установлено" : value; }
     private static String humanSize(long bytes) { if (bytes < 1024) return bytes + " Б"; if (bytes < 1024L * 1024) return String.format("%.1f КБ", bytes / 1024.0); if (bytes < 1024L * 1024 * 1024) return String.format("%.1f МБ", bytes / 1024.0 / 1024.0); return String.format("%.2f ГБ", bytes / 1024.0 / 1024.0 / 1024.0); }
     private static Throwable unwrap(Throwable failure) { return failure.getCause() == null ? failure : failure.getCause(); }

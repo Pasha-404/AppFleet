@@ -31,7 +31,13 @@ public final class SelfUpdateService {
     private final GithubAssetDownloader downloader;
     private final ManifestValidator manifests;
     private final AtomicJsonStore<SelfUpdateMarker> markerStore;
+    private final OperationCoordinator operations;
+
     public SelfUpdateService(BuildInfo build, AppPaths paths, ObjectMapper mapper) {
+        this(build, paths, mapper, new OperationCoordinator());
+    }
+
+    public SelfUpdateService(BuildInfo build, AppPaths paths, ObjectMapper mapper, OperationCoordinator operations) {
         this.build = build;
         this.paths = paths;
         HttpClient http = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL).build();
@@ -39,14 +45,20 @@ public final class SelfUpdateService {
         this.downloader = new GithubAssetDownloader(http, "AppFleet/" + build.version());
         this.manifests = new ManifestValidator(mapper);
         this.markerStore = new AtomicJsonStore<>(mapper, SelfUpdateMarker.class, paths.cacheDirectory().resolve("self-update.json"));
+        this.operations = java.util.Objects.requireNonNull(operations, "operations");
     }
+
     public void recoverAfterLaunch() {
         markerStore.read().ifPresent(marker -> {
-            if (SemVersion.tryParse(build.version()).isPresent() && SemVersion.parse(build.version()).normalized().equals(SemVersion.parse(marker.targetVersion()).normalized())) {
-                deleteDirectory(Path.of(marker.operationDirectory()));
-                try { Files.deleteIfExists(paths.cacheDirectory().resolve("self-update.json")); } catch (IOException ignored) { }
+            Optional<SemVersion> running = SemVersion.tryParse(build.version());
+            Optional<SemVersion> target = SemVersion.tryParse(marker.targetVersion());
+            if (running.isPresent() && target.isPresent() && running.get().equals(target.get())) {
+                clearMarker();
                 log.info("Самообновление до {} подтверждено запуском новой версии", marker.targetVersion());
-            } else log.error("Предыдущее самообновление до {} не подтвердилось; повторный запуск в этом сеансе заблокирован", marker.targetVersion());
+            } else {
+                clearMarker();
+                log.warn("Предыдущее самообновление до {} не подтвердилось. Повторная попытка доступна пользователю.", marker.targetVersion());
+            }
         });
     }
     public CompletableFuture<Optional<SelfUpdateOffer>> checkAsync(Executor executor) { return CompletableFuture.supplyAsync(this::check, executor); }
@@ -60,18 +72,38 @@ public final class SelfUpdateService {
         return Optional.of(new SelfUpdateOffer(build.version(), release, manifest, installer));
     }
     public boolean install(SelfUpdateOffer offer, CancellationToken cancellation, DownloadProgress progress) throws IOException {
-        Optional<SelfUpdateMarker> previous = markerStore.read();
-        if (previous.isPresent() && previous.get().targetVersion().equals(offer.manifest().version())) throw new IOException("Повторное самообновление до той же версии заблокировано после предыдущей попытки");
+        return install(offer, cancellation, progress, OperationProgress.NONE);
+    }
+
+    public boolean install(SelfUpdateOffer offer, CancellationToken cancellation, DownloadProgress progress, OperationProgress operationProgress) throws IOException {
+        OperationCoordinator.Lease lease = operations.tryAcquire(OperationCoordinator.OperationKind.SELF_UPDATE, "AppFleet " + offer.manifest().version())
+                .orElseThrow(() -> new IOException("Уже выполняется другая установка или самообновление AppFleet. Дождитесь её завершения."));
         Path operation = paths.temporaryRoot().resolve("self-update-" + UUID.randomUUID());
-        DownloadedFile installer = downloader.download(offer.installer().downloadUri(), operation, offer.installer().name(), cancellation, progress);
-        ReleaseAsset checksumAsset = offer.release().assets().stream().filter(asset -> asset.name().equals(offer.manifest().installer().sha256AssetName())).findFirst().orElseThrow(() -> new IOException("В релизе AppFleet отсутствует SHA-256"));
-        DownloadedFile checksum = downloader.download(checksumAsset.downloadUri(), operation, checksumAsset.name(), cancellation, DownloadProgress.NONE);
-        ChecksumVerifier verifier = new ChecksumVerifier();
-        if (!verifier.matches(installer.path(), verifier.parseSha256Asset(checksum.path(), installer.path().getFileName().toString()))) throw new IOException("SHA-256 обновления AppFleet не совпал");
-        if (new AuthenticodeVerifier().verify(installer.path()) == AuthenticodeStatus.INVALID) throw new IOException("Цифровая подпись обновления AppFleet недействительна");
-        markerStore.write(new SelfUpdateMarker(offer.manifest().version(), previous.map(marker -> marker.attempts() + 1).orElse(1), operation.toString(), Instant.now()));
-        new ProcessBuilder(commandFor(installer.path())).start();
-        return true;
+        try (lease) {
+            operationProgress.phaseChanged(OperationPhase.DOWNLOADING);
+            DownloadedFile installer = downloader.download(offer.installer().downloadUri(), operation, offer.installer().name(), cancellation, progress);
+            ReleaseAsset checksumAsset = offer.release().assets().stream().filter(asset -> asset.name().equals(offer.manifest().installer().sha256AssetName())).findFirst().orElseThrow(() -> new IOException("В релизе AppFleet отсутствует SHA-256"));
+            DownloadedFile checksum = downloader.download(checksumAsset.downloadUri(), operation, checksumAsset.name(), cancellation, DownloadProgress.NONE);
+            ChecksumVerifier verifier = new ChecksumVerifier();
+            cancellation.throwIfCancelled();
+            operationProgress.phaseChanged(OperationPhase.VERIFYING);
+            if (!verifier.matches(installer.path(), verifier.parseSha256Asset(checksum.path(), installer.path().getFileName().toString()))) throw new IOException("SHA-256 обновления AppFleet не совпал");
+            if (new AuthenticodeVerifier().verify(installer.path()) == AuthenticodeStatus.INVALID) throw new IOException("Цифровая подпись обновления AppFleet недействительна");
+
+            // This marker represents an unconfirmed external installer launch, not a retry lock.
+            cancellation.throwIfCancelled();
+            markerStore.write(new SelfUpdateMarker(offer.manifest().version(), 1, operation.toString(), Instant.now()));
+            try {
+                operationProgress.phaseChanged(OperationPhase.LAUNCHING_INSTALLER);
+                new ProcessBuilder(commandFor(installer.path())).start();
+                return true;
+            } catch (IOException | RuntimeException failure) {
+                clearMarker();
+                throw failure;
+            }
+        } finally {
+            operationProgress.phaseChanged(OperationPhase.FINISHED);
+        }
     }
 
     static List<String> commandFor(Path installer) {
@@ -85,6 +117,14 @@ public final class SelfUpdateService {
             return manifests.validate(Files.readAllBytes(file.path()), repository, release);
         } catch (IOException failure) { throw new IllegalArgumentException("Не удалось загрузить manifest обновления AppFleet", failure); }
         finally { deleteDirectory(operation); }
+    }
+
+    private void clearMarker() {
+        try {
+            markerStore.delete();
+        } catch (IOException failure) {
+            log.warn("Не удалось очистить marker самообновления", failure);
+        }
     }
     private static void deleteDirectory(Path directory) { try { if (!Files.exists(directory)) return; try (var walk = Files.walk(directory)) { walk.sorted(Comparator.reverseOrder()).forEach(path -> { try { Files.deleteIfExists(path); } catch (IOException ignored) { } }); } } catch (IOException ignored) { } }
 }

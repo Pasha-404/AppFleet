@@ -25,6 +25,8 @@ public final class AppFleetService implements AutoCloseable {
     private final GithubApiClient github;
     private final GithubAssetDownloader downloader;
     private final ManifestValidator manifests;
+    private final String appFleetVersion;
+    private final OperationCoordinator operations;
     private final AtomicJsonStore<RepositoriesDocument> repositoriesStore;
     private final AtomicJsonStore<UserSettings> settingsStore;
     private final AtomicJsonStore<ReleaseCache> releaseCacheStore;
@@ -39,18 +41,28 @@ public final class AppFleetService implements AutoCloseable {
     private UserSettings settings;
 
     public AppFleetService(AppPaths paths, ObjectMapper mapper, String version) {
-        this(paths, mapper, version, defaultHttpClient());
+        this(paths, mapper, version, new OperationCoordinator());
     }
 
-    private AppFleetService(AppPaths paths, ObjectMapper mapper, String version, HttpClient http) {
-        this(paths, mapper, version, new GithubApiClient(http, mapper, version), new GithubAssetDownloader(http, "AppFleet/" + version));
+    public AppFleetService(AppPaths paths, ObjectMapper mapper, String version, OperationCoordinator operations) {
+        this(paths, mapper, version, defaultHttpClient(), operations);
+    }
+
+    private AppFleetService(AppPaths paths, ObjectMapper mapper, String version, HttpClient http, OperationCoordinator operations) {
+        this(paths, mapper, version, new GithubApiClient(http, mapper, version), new GithubAssetDownloader(http, "AppFleet/" + version), operations);
     }
 
     AppFleetService(AppPaths paths, ObjectMapper mapper, String version, GithubApiClient github, GithubAssetDownloader downloader) {
+        this(paths, mapper, version, github, downloader, new OperationCoordinator());
+    }
+
+    AppFleetService(AppPaths paths, ObjectMapper mapper, String version, GithubApiClient github, GithubAssetDownloader downloader, OperationCoordinator operations) {
         this.paths = paths;
         this.github = github;
         this.downloader = downloader;
         this.manifests = new ManifestValidator(mapper);
+        this.appFleetVersion = version;
+        this.operations = Objects.requireNonNull(operations, "operations");
         this.repositoriesStore = new AtomicJsonStore<>(mapper, RepositoriesDocument.class, paths.repositoriesFile());
         this.settingsStore = new AtomicJsonStore<>(mapper, UserSettings.class, paths.settingsFile());
         this.releaseCacheStore = new AtomicJsonStore<>(mapper, ReleaseCache.class, paths.cacheDirectory().resolve("release-cache.json"));
@@ -121,8 +133,18 @@ public final class AppFleetService implements AutoCloseable {
             return refreshed;
         }, worker);
     }
-    public OperationPreview preview(RepositoryId id) {
+    public OperationPreview preview(RepositoryId id) { return preview(requireSnapshot(id)); }
+
+    public InstallationPlan prepareInstallation(RepositoryId id, OperationRequest request) {
+        if (!request.confirmed()) {
+            throw new IllegalArgumentException("Операция не подтверждена пользователем");
+        }
         ApplicationSnapshot snapshot = requireSnapshot(id);
+        MinimumAppFleetVersion.requireSupported(appFleetVersion, snapshot.manifest());
+        return new InstallationPlan(UUID.randomUUID(), snapshot, preview(snapshot), request, Instant.now());
+    }
+
+    private OperationPreview preview(ApplicationSnapshot snapshot) {
         if (snapshot.selectedAsset() == null || snapshot.release() == null) throw new IllegalStateException("Для приложения сначала требуется выбрать файл релиза");
         PackageType type = snapshot.manifest() == null ? snapshot.selectedAsset().packageType() : snapshot.manifest().installer().type();
         boolean checksum = snapshot.manifest() != null && snapshot.manifest().installer().sha256AssetName() != null
@@ -130,7 +152,28 @@ public final class AppFleetService implements AutoCloseable {
         return new OperationPreview(snapshot, snapshot.installedVersion(), snapshot.release().tagName(), snapshot.selectedAsset().name(), snapshot.selectedAsset().size(), snapshot.release().body(), snapshot.release().htmlUrl().toString(), checksum, snapshot.manifest() == null && type == PackageType.EXE, type);
     }
     public CompletableFuture<OperationResult> installOrUpdate(RepositoryId id, OperationRequest request, CancellationToken cancellation, DownloadProgress progress) {
-        return CompletableFuture.supplyAsync(() -> performInstall(id, request, cancellation, progress), worker);
+        if (!request.confirmed()) {
+            ApplicationSnapshot snapshot = requireSnapshot(id);
+            return CompletableFuture.completedFuture(new OperationResult(false, false, "Операция отменена", snapshot));
+        }
+        return installOrUpdate(prepareInstallation(id, request), cancellation, progress);
+    }
+
+    public CompletableFuture<OperationResult> installOrUpdate(InstallationPlan plan, CancellationToken cancellation, DownloadProgress progress) {
+        return installOrUpdate(plan, cancellation, progress, OperationProgress.NONE);
+    }
+
+    public CompletableFuture<OperationResult> installOrUpdate(InstallationPlan plan, CancellationToken cancellation, DownloadProgress progress, OperationProgress operationProgress) {
+        OperationCoordinator.Lease lease = operations.tryAcquire(OperationCoordinator.OperationKind.APPLICATION_INSTALL, plan.snapshot().repository().slug())
+                .orElse(null);
+        if (lease == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Уже выполняется другая установка или самообновление AppFleet. Дождитесь её завершения."));
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            try (lease) {
+                return performInstall(plan, cancellation, progress, operationProgress);
+            }
+        }, worker);
     }
 
     private ApplicationSnapshot check(RepositoryState original) {
@@ -192,20 +235,27 @@ public final class AppFleetService implements AutoCloseable {
         } catch (Exception invalid) { return new ManifestResult(null, null, invalid.getMessage());
         } finally { deleteOperationDirectory(operation); }
     }
-    private OperationResult performInstall(RepositoryId id, OperationRequest request, CancellationToken cancellation, DownloadProgress progress) {
-        if (!request.confirmed()) { journal.write(id.slug(), "Установка", "Отменена", "Пользователь не подтвердил операцию", null); return new OperationResult(false, false, "Операция отменена", requireSnapshot(id)); }
-        ApplicationSnapshot snapshot = requireSnapshot(id);
-        OperationPreview preview = preview(id);
+    private OperationResult performInstall(InstallationPlan plan, CancellationToken cancellation, DownloadProgress progress, OperationProgress operationProgress) {
+        ApplicationSnapshot snapshot = plan.snapshot();
+        OperationPreview preview = plan.preview();
+        OperationRequest request = plan.request();
+        RepositoryId id = snapshot.repository();
         boolean firstInstallation = snapshot.status() == AppStatus.NOT_INSTALLED;
         boolean desktopShortcutRequested = firstInstallation && settings().createDesktopShortcutForNewApplications();
         String desktopShortcutTask = desktopShortcutTask(snapshot, preview.packageType());
         Path operation = paths.temporaryRoot().resolve("operation-" + UUID.randomUUID());
         try {
+            operationProgress.phaseChanged(OperationPhase.PREPARING);
+            cancellation.throwIfCancelled();
             List<RunningApplication> previouslyRunning = handleRunningProcesses(snapshot, request);
+            operationProgress.phaseChanged(OperationPhase.DOWNLOADING);
             journal.write(id.slug(), "Скачивание", "Начата", "Скачивается " + preview.assetName(), null);
             DownloadedFile installer = downloader.download(snapshot.selectedAsset().downloadUri(), operation, snapshot.selectedAsset().name(), cancellation, progress);
             cancellation.throwIfCancelled();
+            operationProgress.phaseChanged(OperationPhase.VERIFYING);
             AuthenticodeStatus signature = verifyDownloadedFile(snapshot, installer, operation, cancellation);
+            cancellation.throwIfCancelled();
+            operationProgress.phaseChanged(OperationPhase.LAUNCHING_INSTALLER);
             journal.write(id.slug(), "Установка", "Начата", "Запускается " + preview.assetName(), null);
             InstallerExit exit;
             Optional<InstalledApplication> detectedInstallation = Optional.empty();
@@ -216,6 +266,7 @@ public final class AppFleetService implements AutoCloseable {
                 List<String> baseArguments = snapshot.manifest() == null ? List.of() : snapshot.manifest().installer().silentArgs();
                 List<String> arguments = withDesktopShortcutTask(baseArguments, firstInstallation, desktopShortcutRequested, desktopShortcutTask);
                 journal.write(id.slug(), "Запуск установщика", "Начата", "Запускается " + preview.assetName() + (arguments.isEmpty() ? "" : " с параметрами " + String.join(" ", arguments)), null);
+                operationProgress.phaseChanged(OperationPhase.WAITING_FOR_INSTALLER);
                 exit = new ExternalInstallerRunner().run(installer.path(), preview.packageType(), arguments);
                 journal.write(id.slug(), "Запуск установщика", "Завершён", "Установщик завершил основной процесс с кодом " + exit.code(), null);
                 if (!exit.successful()) throw new IOException(exit.message());
@@ -248,7 +299,10 @@ public final class AppFleetService implements AutoCloseable {
         } catch (Exception failure) {
             journal.write(id.slug(), "Установка", "Ошибка", "Установка не выполнена: " + failure.getMessage(), failure);
             return new OperationResult(false, false, "Установка не выполнена: " + failure.getMessage(), snapshot);
-        } finally { if (!settings.deleteInstallerAfterSuccess()) { /* temporary installer intentionally retained for user diagnostics */ } }
+        } finally {
+            operationProgress.phaseChanged(OperationPhase.FINISHED);
+            if (!settings.deleteInstallerAfterSuccess()) { /* temporary installer intentionally retained for user diagnostics */ }
+        }
     }
 
     static List<String> withDesktopShortcutTask(List<String> baseArguments, boolean firstInstallation, boolean requested, String taskName) {
