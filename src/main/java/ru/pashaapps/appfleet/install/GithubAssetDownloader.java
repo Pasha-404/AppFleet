@@ -110,6 +110,7 @@ public final class GithubAssetDownloader {
             throw cancelled;
         }
         cancellation.throwIfCancelled();
+        progress.completed(received, total);
         return received;
     }
     private static void validateInitialUri(URI uri) throws IOException {

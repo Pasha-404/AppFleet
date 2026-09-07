@@ -53,6 +53,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -60,6 +63,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /** Resolves a detected executable's embedded high-resolution icon without blocking the UI. */
@@ -67,9 +71,8 @@ final class InstalledApplicationIconResolver implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(InstalledApplicationIconResolver.class);
     private static final int ICON_SIZE = 48;
     private static final int SHELL_ICON_REQUEST_SIZE = 96;
-    private static final int EMBEDDED_ICON_REQUEST_SIZE = 256;
-    private static final int MAX_NATIVE_ICON_SIZE = 256;
-    private static final int COLOR_DEPTH = 24;
+    private static final int MAX_NATIVE_ICON_SIZE = 1024;
+    private static final int COLOR_DEPTH = 32;
     private static final int RT_ICON = 3;
     private static final int RT_GROUP_ICON = 14;
     private static final int GROUP_ICON_HEADER_BYTES = 6;
@@ -77,6 +80,7 @@ final class InstalledApplicationIconResolver implements AutoCloseable {
     private static final int MAX_GROUP_ICON_ENTRIES = 128;
     private static final int MAX_ICON_RESOURCE_BYTES = 16 * 1024 * 1024;
     private static final int ICON_RESOURCE_VERSION = 0x00030000;
+    private static final Duration EMPTY_ICON_RETRY_DELAY = Duration.ofSeconds(2);
     private static final int LOAD_LIBRARY_AS_IMAGE_RESOURCE = 0x00000020;
     private static final int RESOURCE_ONLY_LOAD_FLAGS = Kernel32.LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE;
     private static final Guid.IID IID_ISHELL_ITEM = new Guid.IID("{43826D1E-E718-42EE-BC55-A1E261C37BFE}");
@@ -84,20 +88,73 @@ final class InstalledApplicationIconResolver implements AutoCloseable {
     private static final int SIIGBF_BIGGERSIZEOK = 0x00000001;
     private static final int SIIGBF_ICONONLY = 0x00000004;
 
-    private final ExecutorService iconWorker = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("appfleet-icon-", 0).factory());
-    private final Map<Path, CompletableFuture<Optional<BufferedImage>>> cachedIcons = new ConcurrentHashMap<>();
+    private final ExecutorService iconWorker;
+    private final IconLoader iconLoader;
+    private final Map<Path, CacheEntry> cachedIcons = new ConcurrentHashMap<>();
+    private final AtomicLong cacheGeneration = new AtomicLong();
     private final AtomicBoolean closed = new AtomicBoolean();
+
+    InstalledApplicationIconResolver() {
+        this(InstalledApplicationIconResolver::loadBestIcon);
+    }
+
+    /** Visible for tests: native extraction remains behind the default loader. */
+    InstalledApplicationIconResolver(IconLoader iconLoader) {
+        this.iconLoader = iconLoader;
+        this.iconWorker = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("appfleet-icon-", 0).factory());
+    }
 
     Node iconFor(ApplicationSnapshot snapshot) {
         Path executable = executable(snapshot);
         StackPane holder = placeholder(snapshot.displayName());
         if (executable == null || closed.get()) return holder;
 
-        cachedIcons.computeIfAbsent(executable, path -> CompletableFuture
-                        .supplyAsync(() -> loadBestIcon(path), iconWorker)
-                        .exceptionally(failure -> Optional.empty()))
-                .thenAccept(icon -> showIconWhenReady(holder, icon));
+        CacheEntry entry = resolve(executable);
+        entry.icon().thenAccept(icon -> showIconWhenReady(holder, executable, entry, icon));
         return holder;
+    }
+
+    /**
+     * Explicitly drops an icon after AppFleet itself has changed install metadata.  A future
+     * asynchronous result carries its generation and cannot replace the new entry.
+     */
+    void invalidate(ApplicationSnapshot snapshot) {
+        Path executable = executable(snapshot);
+        if (executable != null) invalidate(executable);
+    }
+
+    void invalidate(Path executable) {
+        if (executable == null) return;
+        cachedIcons.remove(executable.toAbsolutePath().normalize());
+    }
+
+    CacheEntry resolve(Path rawExecutable) {
+        Path executable = rawExecutable.toAbsolutePath().normalize();
+        FileIdentity identity = FileIdentity.read(executable);
+        Instant now = Instant.now();
+        return cachedIcons.compute(executable, (path, current) -> {
+            if (current == null || !current.identity().equals(identity) || current.retryDue(now)) {
+                return startEntry(path, identity, now);
+            }
+            return current;
+        });
+    }
+
+    CompletableFuture<Optional<BufferedImage>> resolveImage(Path executable) {
+        return resolve(executable).icon().thenApply(icon -> icon.map(IconPayload::source));
+    }
+
+    private CacheEntry startEntry(Path executable, FileIdentity identity, Instant now) {
+        long generation = cacheGeneration.incrementAndGet();
+        CompletableFuture<Optional<IconPayload>> future = CompletableFuture
+                .supplyAsync(() -> iconLoader.load(executable).flatMap(InstalledApplicationIconResolver::toPayload), iconWorker)
+                .exceptionally(failure -> {
+                    log.debug("Не удалось загрузить иконку {}", executable, failure);
+                    return Optional.empty();
+                });
+        CacheEntry entry = new CacheEntry(identity, generation, future, now);
+        future.thenAccept(entry::complete);
+        return entry;
     }
 
     static Optional<Image> loadSystemIcon(Path executable) {
@@ -108,7 +165,8 @@ final class InstalledApplicationIconResolver implements AutoCloseable {
     private static Optional<BufferedImage> loadBestIcon(Path executable) {
         Optional<BufferedImage> embeddedIcon = loadWindowsEmbeddedExecutableIcon(executable);
         if (embeddedIcon.isPresent()) {
-            log.info("Иконка {}: встроенный ресурс EXE {}×{}", executable.getFileName(), embeddedIcon.get().getWidth(), embeddedIcon.get().getHeight());
+            log.info("Иконка {}: встроенный ресурс EXE декодирован {}×{}; карточка отображает не больше {} px",
+                    executable.getFileName(), embeddedIcon.get().getWidth(), embeddedIcon.get().getHeight(), ICON_SIZE);
             return embeddedIcon;
         }
 
@@ -154,21 +212,37 @@ final class InstalledApplicationIconResolver implements AutoCloseable {
             Pointer groupData = isNull(loadedGroup) ? null : Kernel32.INSTANCE.LockResource(loadedGroup);
             if (!isValidGroupIconDirectory(groupData, groupSize)) return Optional.empty();
 
-            int iconResourceId = User32IconResources.INSTANCE.LookupIconIdFromDirectoryEx(
-                    groupData, true, EMBEDDED_ICON_REQUEST_SIZE, EMBEDDED_ICON_REQUEST_SIZE, WinUser.LR_DEFAULTCOLOR);
-            if (iconResourceId == 0) return Optional.empty();
+            byte[] groupBytes = groupData.getByteArray(0, groupSize);
+            Optional<GroupIconEntry> selected = selectBestGroupIcon(groupBytes);
+            if (selected.isEmpty()) return Optional.empty();
+            GroupIconEntry layer = selected.get();
 
-            HRSRC iconResource = Kernel32.INSTANCE.FindResource(module, resourceId(iconResourceId), resourceId(RT_ICON));
+            HRSRC iconResource = Kernel32.INSTANCE.FindResource(module, resourceId(layer.resourceId()), resourceId(RT_ICON));
             if (isNull(iconResource)) return Optional.empty();
             HANDLE loadedIcon = Kernel32.INSTANCE.LoadResource(module, iconResource);
             int iconSize = Kernel32.INSTANCE.SizeofResource(module, iconResource);
             Pointer iconData = isNull(loadedIcon) ? null : Kernel32.INSTANCE.LockResource(loadedIcon);
             if (iconData == null || iconSize <= 0 || iconSize > MAX_ICON_RESOURCE_BYTES) return Optional.empty();
 
+            byte[] iconBytes = iconData.getByteArray(0, iconSize);
+            Optional<BufferedImage> png = decodePngIconResource(iconBytes);
+            if (png.isPresent()) {
+                BufferedImage image = png.get();
+                log.debug("Иконка {}: выбран PNG-слой ресурса {}×{}, декодирован {}×{}, отображение не больше {} px",
+                        executable.getFileName(), layer.width(), layer.height(), image.getWidth(), image.getHeight(), ICON_SIZE);
+                return png;
+            }
+
             icon = User32IconResources.INSTANCE.CreateIconFromResourceEx(
                     iconData, iconSize, true, ICON_RESOURCE_VERSION,
-                    EMBEDDED_ICON_REQUEST_SIZE, EMBEDDED_ICON_REQUEST_SIZE, WinUser.LR_DEFAULTCOLOR);
-            return isNull(icon) ? Optional.empty() : Optional.ofNullable(renderWindowsIcon(icon));
+                    0, 0, WinUser.LR_DEFAULTCOLOR);
+            if (isNull(icon)) return Optional.empty();
+            BufferedImage rendered = renderWindowsIcon(icon);
+            if (rendered != null) {
+                log.debug("Иконка {}: выбран bitmap-слой ресурса {}×{}, декодирован {}×{}, отображение не больше {} px",
+                        executable.getFileName(), layer.width(), layer.height(), rendered.getWidth(), rendered.getHeight(), ICON_SIZE);
+            }
+            return Optional.ofNullable(rendered);
         } catch (LinkageError | RuntimeException failure) {
             log.debug("Не удалось извлечь встроенную иконку из {}", executable, failure);
             return Optional.empty();
@@ -202,12 +276,145 @@ final class InstalledApplicationIconResolver implements AutoCloseable {
         return reserved == 0 && type == 1 && count > 0 && count <= MAX_GROUP_ICON_ENTRIES && requiredBytes <= size;
     }
 
+    /**
+     * Chooses the smallest native layer that is at least as large as the card icon; if all
+     * layers are smaller, it keeps the largest one.  The selected bytes are never upscaled at
+     * the Win32 boundary, so the image dimensions remain evidence of the actual resource.
+     */
+    static Optional<GroupIconEntry> selectBestGroupIcon(byte[] directory) {
+        if (!isValidGroupIconDirectory(directory)) return Optional.empty();
+        int count = Short.toUnsignedInt(readShort(directory, 4));
+        GroupIconEntry bestAbove = null;
+        GroupIconEntry bestBelow = null;
+        for (int index = 0; index < count; index++) {
+            int offset = GROUP_ICON_HEADER_BYTES + index * GROUP_ICON_ENTRY_BYTES;
+            int width = Byte.toUnsignedInt(directory[offset]);
+            int height = Byte.toUnsignedInt(directory[offset + 1]);
+            width = width == 0 ? 256 : width;
+            height = height == 0 ? 256 : height;
+            int bitCount = Short.toUnsignedInt(readShort(directory, offset + 6));
+            long bytes = Integer.toUnsignedLong(readInt(directory, offset + 8));
+            int resourceId = Short.toUnsignedInt(readShort(directory, offset + 12));
+            if (width <= 0 || height <= 0 || width > MAX_NATIVE_ICON_SIZE || height > MAX_NATIVE_ICON_SIZE
+                    || bytes <= 0 || bytes > MAX_ICON_RESOURCE_BYTES || resourceId == 0) continue;
+            GroupIconEntry entry = new GroupIconEntry(width, height, bitCount, resourceId);
+            int extent = Math.max(width, height);
+            if (extent >= ICON_SIZE) {
+                if (bestAbove == null || compareNativeLayers(entry, bestAbove) < 0) bestAbove = entry;
+            } else if (bestBelow == null || compareNativeLayers(entry, bestBelow) > 0) {
+                bestBelow = entry;
+            }
+        }
+        return Optional.ofNullable(bestAbove != null ? bestAbove : bestBelow);
+    }
+
+    private static boolean isValidGroupIconDirectory(byte[] directory) {
+        if (directory == null || directory.length < GROUP_ICON_HEADER_BYTES) return false;
+        int reserved = Short.toUnsignedInt(readShort(directory, 0));
+        int type = Short.toUnsignedInt(readShort(directory, 2));
+        int count = Short.toUnsignedInt(readShort(directory, 4));
+        long requiredBytes = GROUP_ICON_HEADER_BYTES + (long) count * GROUP_ICON_ENTRY_BYTES;
+        return reserved == 0 && type == 1 && count > 0 && count <= MAX_GROUP_ICON_ENTRIES && requiredBytes <= directory.length;
+    }
+
+    private static int compareNativeLayers(GroupIconEntry left, GroupIconEntry right) {
+        int byExtent = Integer.compare(Math.max(left.width(), left.height()), Math.max(right.width(), right.height()));
+        return byExtent != 0 ? byExtent : Integer.compare(left.bitCount(), right.bitCount());
+    }
+
+    private static short readShort(byte[] source, int offset) {
+        return (short) (Byte.toUnsignedInt(source[offset]) | Byte.toUnsignedInt(source[offset + 1]) << 8);
+    }
+
+    private static int readInt(byte[] source, int offset) {
+        return Byte.toUnsignedInt(source[offset])
+                | Byte.toUnsignedInt(source[offset + 1]) << 8
+                | Byte.toUnsignedInt(source[offset + 2]) << 16
+                | Byte.toUnsignedInt(source[offset + 3]) << 24;
+    }
+
+    static Optional<BufferedImage> decodePngIconResource(byte[] iconBytes) {
+        if (!isPng(iconBytes)) return Optional.empty();
+        try (ByteArrayInputStream input = new ByteArrayInputStream(iconBytes)) {
+            BufferedImage image = ImageIO.read(input);
+            if (image == null || image.getWidth() <= 0 || image.getHeight() <= 0
+                    || image.getWidth() > MAX_NATIVE_ICON_SIZE || image.getHeight() > MAX_NATIVE_ICON_SIZE) return Optional.empty();
+            return Optional.of(image);
+        } catch (IOException | RuntimeException invalidImage) {
+            return Optional.empty();
+        }
+    }
+
+    private static boolean isPng(byte[] value) {
+        return value != null && value.length >= 8
+                && value[0] == (byte) 0x89 && value[1] == 0x50 && value[2] == 0x4E && value[3] == 0x47
+                && value[4] == 0x0D && value[5] == 0x0A && value[6] == 0x1A && value[7] == 0x0A;
+    }
+
     private static Pointer resourceId(int id) {
         return Pointer.createConstant(Integer.toUnsignedLong(id));
     }
 
     private static boolean isNull(HANDLE handle) {
         return handle == null || handle.getPointer() == null || Pointer.nativeValue(handle.getPointer()) == 0;
+    }
+
+    private static final class CacheEntry {
+        private final FileIdentity identity;
+        private final long generation;
+        private final CompletableFuture<Optional<IconPayload>> icon;
+        private final Instant createdAt;
+        private volatile Optional<IconPayload> completed;
+        /** Accessed only from the JavaFX callback. */
+        private Optional<Image> presentation;
+
+        private CacheEntry(FileIdentity identity, long generation, CompletableFuture<Optional<IconPayload>> icon, Instant createdAt) {
+            this.identity = identity;
+            this.generation = generation;
+            this.icon = icon;
+            this.createdAt = createdAt;
+        }
+
+        private FileIdentity identity() { return identity; }
+        private CompletableFuture<Optional<IconPayload>> icon() { return icon; }
+        private void complete(Optional<IconPayload> result) { completed = result; }
+
+        private boolean retryDue(Instant now) {
+            return completed != null && completed.isEmpty() && !now.isBefore(createdAt.plus(EMPTY_ICON_RETRY_DELAY));
+        }
+
+        private Optional<Image> presentation(Optional<IconPayload> payload) {
+            if (presentation == null) {
+                presentation = payload.flatMap(InstalledApplicationIconResolver::toJavaFxImage);
+            }
+            return presentation;
+        }
+    }
+
+    private record IconPayload(BufferedImage source, byte[] png) {}
+
+    @FunctionalInterface
+    interface IconLoader {
+        Optional<BufferedImage> load(Path executable);
+    }
+
+    private enum FileState { REGULAR_FILE, MISSING, UNAVAILABLE }
+
+    private record FileIdentity(FileState state, long size, java.nio.file.attribute.FileTime lastModified, String fileKey) {
+        private static FileIdentity read(Path executable) {
+            try {
+                BasicFileAttributes attributes = Files.readAttributes(executable, BasicFileAttributes.class);
+                if (!attributes.isRegularFile()) return new FileIdentity(FileState.MISSING, 0, null, null);
+                Object key = attributes.fileKey();
+                return new FileIdentity(FileState.REGULAR_FILE, attributes.size(), attributes.lastModifiedTime(), key == null ? null : key.toString());
+            } catch (java.nio.file.NoSuchFileException missing) {
+                return new FileIdentity(FileState.MISSING, 0, null, null);
+            } catch (IOException | SecurityException unavailable) {
+                return new FileIdentity(FileState.UNAVAILABLE, 0, null, null);
+            }
+        }
+
+        private boolean regularFile() { return state == FileState.REGULAR_FILE; }
     }
 
     /**
@@ -300,21 +507,33 @@ final class InstalledApplicationIconResolver implements AutoCloseable {
     }
 
     private static Optional<Image> toJavaFxImage(BufferedImage buffered) {
+        return toPayload(buffered).flatMap(InstalledApplicationIconResolver::toJavaFxImage);
+    }
+
+    private static Optional<IconPayload> toPayload(BufferedImage buffered) {
         try {
             ByteArrayOutputStream bytes = new ByteArrayOutputStream();
             if (!ImageIO.write(buffered, "png", bytes)) return Optional.empty();
-            return Optional.of(new Image(new ByteArrayInputStream(bytes.toByteArray())));
+            return Optional.of(new IconPayload(buffered, bytes.toByteArray()));
         } catch (IOException | RuntimeException ignored) {
             return Optional.empty();
         }
     }
 
-    private void showIconWhenReady(StackPane holder, Optional<BufferedImage> bufferedIcon) {
-        if (bufferedIcon.isEmpty() || closed.get()) return;
+    private static Optional<Image> toJavaFxImage(IconPayload payload) {
+        try (ByteArrayInputStream bytes = new ByteArrayInputStream(payload.png())) {
+            return Optional.of(new Image(bytes));
+        } catch (IOException | RuntimeException ignored) {
+            return Optional.empty();
+        }
+    }
+
+    private void showIconWhenReady(StackPane holder, Path executable, CacheEntry expected, Optional<IconPayload> payload) {
+        if (payload.isEmpty() || closed.get()) return;
         try {
             javafx.application.Platform.runLater(() -> {
-                if (closed.get()) return;
-                toJavaFxImage(bufferedIcon.get()).ifPresent(image -> {
+                if (closed.get() || cachedIcons.get(executable) != expected) return;
+                expected.presentation(payload).ifPresent(image -> {
                     holder.getChildren().setAll(iconView(image));
                     holder.getStyleClass().remove("application-icon-placeholder");
                 });
@@ -407,45 +626,34 @@ final class InstalledApplicationIconResolver implements AutoCloseable {
     private static BufferedImage renderWindowsIcon(HICON icon) {
         Dimension size = WindowUtils.getIconSize(icon);
         if (size.width <= 0 || size.height <= 0 || size.width > MAX_NATIVE_ICON_SIZE || size.height > MAX_NATIVE_ICON_SIZE) return null;
-        int rowBytes = ((size.width * COLOR_DEPTH + 31) / 32) * 4;
-        int bytesLength = Math.multiplyExact(rowBytes, size.height);
         ICONINFO iconInfo = new ICONINFO();
         HDC deviceContext = null;
         try {
             if (!User32.INSTANCE.GetIconInfo(icon, iconInfo)) return null;
             iconInfo.read();
-            if (iconInfo.hbmColor == null || iconInfo.hbmMask == null) return null;
-
-            BITMAPINFO bitmapInfo = new BITMAPINFO();
-            BITMAPINFOHEADER header = new BITMAPINFOHEADER();
-            bitmapInfo.bmiHeader = header;
-            header.biWidth = size.width;
-            header.biHeight = size.height;
-            header.biPlanes = 1;
-            header.biBitCount = COLOR_DEPTH;
-            header.biCompression = WinGDI.BI_RGB;
-            header.biSizeImage = bytesLength;
-            header.write();
-            bitmapInfo.write();
+            if (iconInfo.hbmColor == null) return null;
 
             deviceContext = User32.INSTANCE.GetDC(null);
             if (deviceContext == null) return null;
-            Memory colorMemory = new Memory(bytesLength);
-            Memory maskMemory = new Memory(bytesLength);
-            if (GDI32.INSTANCE.GetDIBits(deviceContext, iconInfo.hbmColor, 0, size.height, colorMemory, bitmapInfo, WinGDI.DIB_RGB_COLORS) == 0
-                    || GDI32.INSTANCE.GetDIBits(deviceContext, iconInfo.hbmMask, 0, size.height, maskMemory, bitmapInfo, WinGDI.DIB_RGB_COLORS) == 0) return null;
-
-            byte[] color = colorMemory.getByteArray(0, bytesLength);
-            byte[] mask = maskMemory.getByteArray(0, bytesLength);
+            byte[] color = readBgra32(deviceContext, iconInfo.hbmColor, size.width, size.height);
+            if (color == null) return null;
+            byte[] mask = iconInfo.hbmMask == null ? null : readBgra32(deviceContext, iconInfo.hbmMask, size.width, size.height);
+            boolean containsAlpha = hasNonZeroAlpha(color);
             BufferedImage image = new BufferedImage(size.width, size.height, BufferedImage.TYPE_INT_ARGB);
+            int rowBytes = Math.multiplyExact(size.width, 4);
             for (int y = 0; y < size.height; y++) {
                 int sourceRow = (size.height - 1 - y) * rowBytes;
                 for (int x = 0; x < size.width; x++) {
-                    int offset = sourceRow + x * 3;
+                    int offset = sourceRow + x * 4;
                     int blue = Byte.toUnsignedInt(color[offset]);
                     int green = Byte.toUnsignedInt(color[offset + 1]);
                     int red = Byte.toUnsignedInt(color[offset + 2]);
-                    int alpha = 0xFF - Byte.toUnsignedInt(mask[offset]);
+                    int alpha = containsAlpha ? Byte.toUnsignedInt(color[offset + 3]) : legacyMaskAlpha(mask, offset);
+                    if (containsAlpha && alpha > 0 && alpha < 0xFF) {
+                        red = unpremultiply(red, alpha);
+                        green = unpremultiply(green, alpha);
+                        blue = unpremultiply(blue, alpha);
+                    }
                     image.setRGB(x, y, alpha << 24 | red << 16 | green << 8 | blue);
                 }
             }
@@ -457,6 +665,45 @@ final class InstalledApplicationIconResolver implements AutoCloseable {
             if (iconInfo.hbmColor != null) GDI32.INSTANCE.DeleteObject(iconInfo.hbmColor);
             if (iconInfo.hbmMask != null) GDI32.INSTANCE.DeleteObject(iconInfo.hbmMask);
         }
+    }
+
+    private static byte[] readBgra32(HDC deviceContext, HBITMAP bitmap, int width, int height) {
+        try {
+            int rowBytes = Math.multiplyExact(width, 4);
+            int bytesLength = Math.multiplyExact(rowBytes, height);
+            BITMAPINFO bitmapInfo = new BITMAPINFO();
+            BITMAPINFOHEADER header = new BITMAPINFOHEADER();
+            bitmapInfo.bmiHeader = header;
+            header.biWidth = width;
+            header.biHeight = height;
+            header.biPlanes = 1;
+            header.biBitCount = COLOR_DEPTH;
+            header.biCompression = WinGDI.BI_RGB;
+            header.biSizeImage = bytesLength;
+            header.write();
+            bitmapInfo.write();
+            Memory pixels = new Memory(bytesLength);
+            if (GDI32.INSTANCE.GetDIBits(deviceContext, bitmap, 0, height, pixels, bitmapInfo, WinGDI.DIB_RGB_COLORS) == 0) return null;
+            return pixels.getByteArray(0, bytesLength);
+        } catch (LinkageError | RuntimeException invalidBitmap) {
+            return null;
+        }
+    }
+
+    private static boolean hasNonZeroAlpha(byte[] pixels) {
+        for (int offset = 3; offset < pixels.length; offset += 4) {
+            if (pixels[offset] != 0) return true;
+        }
+        return false;
+    }
+
+    private static int legacyMaskAlpha(byte[] mask, int offset) {
+        if (mask == null || offset + 2 >= mask.length) return 0xFF;
+        return Math.max(Byte.toUnsignedInt(mask[offset]), Math.max(Byte.toUnsignedInt(mask[offset + 1]), Byte.toUnsignedInt(mask[offset + 2]))) >= 0x80 ? 0 : 0xFF;
+    }
+
+    private static int unpremultiply(int color, int alpha) {
+        return Math.min(0xFF, (color * 0xFF + alpha / 2) / alpha);
     }
 
     private static Path executable(ApplicationSnapshot snapshot) {
@@ -505,6 +752,8 @@ final class InstalledApplicationIconResolver implements AutoCloseable {
             return new ResourcePointer(textMemory, textMemory);
         }
     }
+
+    record GroupIconEntry(int width, int height, int bitCount, int resourceId) {}
 
     /** Retains the native buffer for a string resource name until FindResource returns. */
     private record ResourcePointer(Pointer pointer, Memory retainedMemory) {}

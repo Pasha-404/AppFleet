@@ -16,6 +16,7 @@ import ru.pashaapps.appfleet.BuildInfo;
 import ru.pashaapps.appfleet.domain.ReleaseAsset;
 import ru.pashaapps.appfleet.domain.RepositoryId;
 import ru.pashaapps.appfleet.install.CancellationToken;
+import ru.pashaapps.appfleet.install.CoalescingDownloadProgress;
 import ru.pashaapps.appfleet.install.DownloadProgress;
 import ru.pashaapps.appfleet.persistence.OperationEntry;
 import ru.pashaapps.appfleet.persistence.UserSettings;
@@ -290,7 +291,7 @@ public final class MainWindow {
                 continueAfterForceClose(result.forceCloseContinuation(), force.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK);
                 return;
             }
-            applications.setAll(service.currentSnapshots());
+            replaceApplicationsAfterInstallation();
             Alert outcome = new Alert(result.successful() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR, result.message(), ButtonType.OK); outcome.initOwner(stage); outcome.setHeaderText(result.successful() ? "Операция завершена" : "Операция не выполнена"); outcome.showAndWait();
         }));
     }
@@ -309,13 +310,20 @@ public final class MainWindow {
                 showError("Операция завершилась ошибкой", unwrap(failure).getMessage());
                 return;
             }
-            applications.setAll(service.currentSnapshots());
+            replaceApplicationsAfterInstallation();
             Alert outcome = new Alert(result.successful() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR, result.message(), ButtonType.OK);
             outcome.initOwner(stage);
             outcome.setHeaderText(result.successful() ? "Операция завершена" : "Операция не выполнена");
             outcome.showAndWait();
         }));
     }
+
+    private void replaceApplicationsAfterInstallation() {
+        List<ApplicationSnapshot> refreshed = service.currentSnapshots();
+        refreshed.forEach(icons::invalidate);
+        applications.setAll(refreshed);
+    }
+
     private Optional<OperationRequest> showOperationConfirmation(OperationPreview preview) {
         Dialog<OperationRequest> dialog = new Dialog<>(); dialog.initOwner(stage); dialog.setTitle("Подтверждение установки"); dialog.setHeaderText(preview.application().displayName() + " — " + preview.targetVersion());
         String signatureNotice = preview.packageType() == ru.pashaapps.appfleet.domain.PackageType.EXE
@@ -326,7 +334,14 @@ public final class MainWindow {
         VBox content = new VBox(12, details, new Separator(), close); content.setPrefWidth(600); dialog.getDialogPane().setContent(content); ButtonType execute = new ButtonType(preview.currentVersion() == null ? "Установить" : "Обновить", ButtonBar.ButtonData.OK_DONE); dialog.getDialogPane().getButtonTypes().addAll(execute, ButtonType.CANCEL); dialog.setResultConverter(button -> button == execute ? new OperationRequest(true, close.isSelected(), false) : OperationRequest.cancelled()); return dialog.showAndWait().filter(OperationRequest::confirmed);
     }
     private Stage progressStage(String title, AtomicBoolean cancelled) { Stage popup = new Stage(); popup.initOwner(stage); popup.initModality(Modality.WINDOW_MODAL); popup.setTitle(title); ProgressBar bar = new ProgressBar(ProgressIndicator.INDETERMINATE_PROGRESS); bar.setPrefWidth(330); Label label = new Label("Подготовка…"); Button cancel = new Button("Отмена"); cancel.setOnAction(event -> { cancelled.set(true); cancel.setDisable(true); label.setText("Отмена…"); }); VBox box = new VBox(12, label, bar, cancel); box.setPadding(new Insets(20)); box.setAlignment(Pos.CENTER); popup.setScene(new javafx.scene.Scene(box)); popup.setResizable(false); popup.show(); popup.getProperties().put("bar", bar); popup.getProperties().put("label", label); popup.getProperties().put("cancel", cancel); return popup; }
-    private DownloadProgress updateProgress(Stage popup) { return (received, total) -> Platform.runLater(() -> { ProgressBar bar = (ProgressBar) popup.getProperties().get("bar"); Label label = (Label) popup.getProperties().get("label"); bar.setProgress(total <= 0 ? ProgressIndicator.INDETERMINATE_PROGRESS : (double) received / total); label.setText(total <= 0 ? humanSize(received) + " скачано" : humanSize(received) + " из " + humanSize(total)); }); }
+    private DownloadProgress updateProgress(Stage popup) {
+        return new CoalescingDownloadProgress((received, total) -> Platform.runLater(() -> {
+            ProgressBar bar = (ProgressBar) popup.getProperties().get("bar");
+            Label label = (Label) popup.getProperties().get("label");
+            bar.setProgress(total <= 0 ? ProgressIndicator.INDETERMINATE_PROGRESS : (double) received / total);
+            label.setText(total <= 0 ? humanSize(received) + " скачано" : humanSize(received) + " из " + humanSize(total));
+        }));
+    }
     private OperationProgress operationProgress(Stage popup) { return phase -> Platform.runLater(() -> showOperationPhase(popup, phase)); }
     private void showOperationPhase(Stage popup, OperationPhase phase) { Label label = (Label) popup.getProperties().get("label"); Button cancel = (Button) popup.getProperties().get("cancel"); if (phase != OperationPhase.FINISHED) label.setText(phase.display()); cancel.setDisable(!phase.cancellable() || cancel.isDisable()); }
     private void refreshJournal() { journalTable.setItems(FXCollections.observableArrayList(service.journalEntries())); }
