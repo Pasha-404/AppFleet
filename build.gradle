@@ -6,6 +6,8 @@ plugins {
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import java.security.MessageDigest
+import java.util.Properties
+import java.util.zip.ZipFile
 
 group = 'ru.pashaapps'
 version = providers.gradleProperty('version').orElse('1.0.0').get()
@@ -92,6 +94,9 @@ tasks.named('jar') {
 
 def generatedResources = layout.buildDirectory.dir('generated/resources/main')
 tasks.register('generateBuildInfo') {
+    inputs.property('version', providers.provider { project.version.toString() })
+    inputs.property('repositoryUrl', appfleetRepositoryUrl)
+    inputs.property('appId', appfleetAppId)
     outputs.file(generatedResources.map { it.file('appfleet-build.properties') })
     doLast {
         def output = generatedResources.get().file('appfleet-build.properties').asFile
@@ -101,6 +106,32 @@ tasks.register('generateBuildInfo') {
 }
 sourceSets.main.resources.srcDir(generatedResources)
 tasks.named('processResources') { dependsOn tasks.named('generateBuildInfo') }
+
+tasks.register('verifyBuildInfo') {
+    group = 'verification'
+    description = 'Verifies the build metadata embedded into the generated JAR resource.'
+    dependsOn tasks.named('jar')
+    inputs.file(tasks.named('jar').flatMap { it.archiveFile })
+    inputs.property('version', providers.provider { project.version.toString() })
+    inputs.property('repositoryUrl', appfleetRepositoryUrl)
+    inputs.property('appId', appfleetAppId)
+    doLast {
+        ZipFile jar = new ZipFile(tasks.named('jar').get().archiveFile.get().asFile)
+        try {
+            def entry = jar.getEntry('appfleet-build.properties')
+            if (entry == null) throw new GradleException('JAR does not contain appfleet-build.properties')
+            Properties metadata = new Properties()
+            jar.getInputStream(entry).withCloseable { input -> metadata.load(input) }
+            if (metadata.getProperty('version') != project.version.toString()
+                    || metadata.getProperty('repositoryUrl') != appfleetRepositoryUrl.get()
+                    || metadata.getProperty('appId') != appfleetAppId.get()) {
+                throw new GradleException('Embedded BuildInfo does not match current version, repository URL and AppId')
+            }
+        } finally {
+            jar.close()
+        }
+    }
+}
 
 tasks.named('run', JavaExec) {
     doFirst {
@@ -270,13 +301,19 @@ tasks.register('generateReleaseFiles') {
 
 tasks.register('verifyReleaseMetadata') {
     group = 'verification'
-    dependsOn 'generateReleaseFiles'
+    dependsOn 'generateReleaseFiles', 'verifyBuildInfo'
     doLast {
         def output = releaseDirectory.asFile
         def installer = file("${output}/${installerName}")
         def checksum = file("${output}/${installerName}.sha256")
         def manifest = new JsonSlurper().parse(file("${output}/${releaseManifestName}"))
-        if (!installer.isFile() || !checksum.isFile() || !checksum.text.matches(/(?s)^[a-f0-9]{64}  \Q${installerName}\E\s*$/)) throw new GradleException('Invalid installer or SHA-256 release asset')
+        def names = output.listFiles()?.findAll { it.isFile() }?.collect { it.name }?.toSet() ?: Set.of()
+        def expectedNames = Set.of(installerName, "${installerName}.sha256", releaseManifestName)
+        def actualHash = installer.isFile() ? MessageDigest.getInstance('SHA-256').digest(installer.bytes).encodeHex().toString() : ''
+        def expectedChecksum = "${actualHash}  ${installerName}"
+        if (!installer.isFile() || installer.length() == 0 || !checksum.isFile() || checksum.getText('UTF-8').trim() != expectedChecksum || names != expectedNames) {
+            throw new GradleException('Release directory must contain exactly the installer, its matching SHA-256 file and appfleet manifest')
+        }
         if (manifest.version != project.version.toString() || manifest.appId != appfleetAppId.get() || manifest.installer.assetName != installerName || manifest.installer.sha256AssetName != "${installerName}.sha256" || manifest.installer.desktopShortcutTask != 'desktopicon') throw new GradleException('Release manifest does not match generated installer')
     }
 }

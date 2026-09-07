@@ -73,11 +73,11 @@ public final class SelfUpdateService {
         ReleaseAsset installer = release.assets().stream().filter(asset -> asset.name().equals(manifest.installer().assetName())).findFirst().orElseThrow();
         return Optional.of(new SelfUpdateOffer(build.version(), release, manifest, installer));
     }
-    public boolean install(SelfUpdateOffer offer, CancellationToken cancellation, DownloadProgress progress) throws IOException {
+    public SelfUpdateLaunchResult install(SelfUpdateOffer offer, CancellationToken cancellation, DownloadProgress progress) throws IOException {
         return install(offer, cancellation, progress, OperationProgress.NONE);
     }
 
-    public boolean install(SelfUpdateOffer offer, CancellationToken cancellation, DownloadProgress progress, OperationProgress operationProgress) throws IOException {
+    public SelfUpdateLaunchResult install(SelfUpdateOffer offer, CancellationToken cancellation, DownloadProgress progress, OperationProgress operationProgress) throws IOException {
         OperationCoordinator.Lease lease = operations.tryAcquire(OperationCoordinator.OperationKind.SELF_UPDATE, "AppFleet " + offer.manifest().version())
                 .orElseThrow(() -> new IOException("Уже выполняется другая установка или самообновление AppFleet. Дождитесь её завершения."));
         OperationDirectory operation = OperationDirectory.create(paths.temporaryRoot(), "self-update-");
@@ -86,11 +86,10 @@ public final class SelfUpdateService {
             DownloadedFile installer = downloader.download(offer.installer().downloadUri(), operation.path(), offer.installer().name(), cancellation, progress);
             ReleaseAsset checksumAsset = offer.release().assets().stream().filter(asset -> asset.name().equals(offer.manifest().installer().sha256AssetName())).findFirst().orElseThrow(() -> new IOException("В релизе AppFleet отсутствует SHA-256"));
             DownloadedFile checksum = downloader.download(checksumAsset.downloadUri(), operation.path(), checksumAsset.name(), cancellation, DownloadProgress.NONE);
-            ChecksumVerifier verifier = new ChecksumVerifier();
             cancellation.throwIfCancelled();
             operationProgress.phaseChanged(OperationPhase.VERIFYING);
-            if (!verifier.matches(installer.path(), verifier.parseSha256Asset(checksum.path(), installer.path().getFileName().toString()))) throw new IOException("SHA-256 обновления AppFleet не совпал");
-            if (new AuthenticodeVerifier().verify(installer.path()) == AuthenticodeStatus.INVALID) throw new IOException("Цифровая подпись обновления AppFleet недействительна");
+            FileVerificationResult verification = new FileVerificationService().verify(installer.path(), PackageType.INNO, checksum.path());
+            if (!verification.permitsInstallation()) throw new IOException("Цифровая подпись обновления AppFleet недействительна");
 
             // This marker represents an unconfirmed external installer launch, not a retry lock.
             cancellation.throwIfCancelled();
@@ -99,7 +98,7 @@ public final class SelfUpdateService {
                 operationProgress.phaseChanged(OperationPhase.LAUNCHING_INSTALLER);
                 new ProcessBuilder(commandFor(installer.path())).start();
                 operation.detach();
-                return true;
+                return new SelfUpdateLaunchResult(verification);
             } catch (IOException | RuntimeException failure) {
                 clearMarker();
                 throw failure;

@@ -197,7 +197,7 @@ public final class AppFleetService implements AutoCloseable {
                 List<RunningApplication> closed = forceCloseExactProcesses(pending.plan().snapshot(), pending.forceCloseProcesses());
                 List<RunningApplication> restarted = new ArrayList<>(pending.gracefullyClosed());
                 restarted.addAll(closed);
-                return launchVerifiedInstaller(pending.plan(), pending.installer(), pending.signature(), pending.operationDirectory(), restarted, operationProgress);
+                return launchVerifiedInstaller(pending.plan(), pending.installer(), pending.verification(), pending.operationDirectory(), restarted, operationProgress);
             } catch (Exception failure) {
                 pending.operationDirectory().detach();
                 journal.write(pending.plan().snapshot().repository().slug(), "Установка", "Ошибка", "Установка не выполнена: " + failure.getMessage(), failure);
@@ -306,18 +306,18 @@ public final class AppFleetService implements AutoCloseable {
             DownloadedFile installer = downloader.download(snapshot.selectedAsset().downloadUri(), operation.path(), snapshot.selectedAsset().name(), cancellation, progress);
             cancellation.throwIfCancelled();
             operationProgress.phaseChanged(OperationPhase.VERIFYING);
-            AuthenticodeStatus signature = verifyDownloadedFile(snapshot, installer, operation.path(), cancellation);
+            FileVerificationResult verification = verifyDownloadedFile(snapshot, installer, operation.path(), cancellation);
             cancellation.throwIfCancelled();
             ProcessClosePreparation closePreparation = closeRunningProcesses(snapshot, plan.request());
             if (!closePreparation.forceCloseProcesses().isEmpty() && !plan.request().forceCloseIfNeeded()) {
                 ForceCloseContinuation continuation = new ForceCloseContinuation(UUID.randomUUID(), snapshot.displayName(), closePreparation.forceCloseProcesses());
-                putPendingInstallation(new PendingInstallation(continuation, plan, installer, signature, operation, closePreparation.gracefullyClosed(), closePreparation.forceCloseProcesses(), lease));
+                putPendingInstallation(new PendingInstallation(continuation, plan, installer, verification, operation, closePreparation.gracefullyClosed(), closePreparation.forceCloseProcesses(), lease));
                 waitingForForceConsent = true;
                 return OperationResult.forceCloseConfirmationRequired(snapshot, continuation);
             }
             List<RunningApplication> closed = new ArrayList<>(closePreparation.gracefullyClosed());
             if (!closePreparation.forceCloseProcesses().isEmpty()) closed.addAll(forceCloseExactProcesses(snapshot, closePreparation.forceCloseProcesses()));
-            return launchVerifiedInstaller(plan, installer, signature, operation, closed, operationProgress);
+            return launchVerifiedInstaller(plan, installer, verification, operation, closed, operationProgress);
         } catch (OperationCancelledException cancelled) {
             if (operation != null) operation.detach();
             journal.write(id.slug(), "Установка", "Отменена", "Операция отменена пользователем", null);
@@ -332,7 +332,7 @@ public final class AppFleetService implements AutoCloseable {
         }
     }
 
-    private OperationResult launchVerifiedInstaller(InstallationPlan plan, DownloadedFile installer, AuthenticodeStatus signature, OperationDirectory operation,
+    private OperationResult launchVerifiedInstaller(InstallationPlan plan, DownloadedFile installer, FileVerificationResult verification, OperationDirectory operation,
                                                      List<RunningApplication> previouslyRunning, OperationProgress operationProgress) throws IOException {
         ApplicationSnapshot snapshot = plan.snapshot();
         OperationPreview preview = plan.preview();
@@ -384,19 +384,14 @@ public final class AppFleetService implements AutoCloseable {
             ApplicationSnapshot updated = check(installed);
             synchronized (this) { snapshots.put(id.normalizedKey(), updated); }
             cleanDownloadedFilesAfterSuccess(operation, plan.settings(), id);
-            String resultMessage = exit.message();
-            if (signature == AuthenticodeStatus.NOT_SIGNED) {
-                String warning = "Установщик не имеет цифровой подписи. AppFleet проверил SHA-256 и продолжил установку.";
-                journal.write(id.slug(), "Проверка файла", "Предупреждение", warning, null);
-                resultMessage += "\n\nПредупреждение: " + warning;
-            }
+            String resultMessage = exit.message() + "\n\nПроверка файла: " + verification.summary();
             if (desktopShortcutRequested && desktopShortcutTask == null) {
                 String warning = "Ярлык на рабочем столе не создан: manifest приложения не объявляет поддерживаемую Inno Setup task.";
                 journal.write(id.slug(), "Ярлык на рабочем столе", "Предупреждение", warning, null);
                 resultMessage += "\n\nПредупреждение: " + warning;
             }
             journal.write(id.slug(), "Установка", "Успешно", resultMessage, null);
-            return new OperationResult(true, exit.restartRequired(), resultMessage, updated);
+            return new OperationResult(true, exit.restartRequired(), resultMessage, updated, OperationOutcome.COMPLETED, null, verification);
         } catch (Exception failure) {
             if (managedZip != null && !installedStatePersisted) {
                 try {
@@ -443,24 +438,20 @@ public final class AppFleetService implements AutoCloseable {
         if (packageType != PackageType.INNO || snapshot.manifest() == null) return null;
         return snapshot.manifest().installer().desktopShortcutTask();
     }
-    private AuthenticodeStatus verifyDownloadedFile(ApplicationSnapshot snapshot, DownloadedFile downloaded, Path operation, CancellationToken cancellation) throws IOException {
-        ChecksumVerifier checksums = new ChecksumVerifier();
+    private FileVerificationResult verifyDownloadedFile(ApplicationSnapshot snapshot, DownloadedFile downloaded, Path operation, CancellationToken cancellation) throws IOException {
         String checksumName = snapshot.manifest() == null ? downloaded.path().getFileName() + ".sha256" : snapshot.manifest().installer().sha256AssetName();
         Optional<ReleaseAsset> checksumAsset = checksumName == null ? Optional.empty() : snapshot.release().assets().stream().filter(asset -> asset.name().equals(checksumName)).findFirst();
         if (snapshot.manifest() != null && checksumAsset.isEmpty()) throw new IOException("Для стандартного приложения отсутствует обязательный SHA-256");
+        Path checksumPath = null;
         if (checksumAsset.isPresent()) {
             DownloadedFile checksum = downloader.download(checksumAsset.get().downloadUri(), operation, checksumAsset.get().name(), cancellation, DownloadProgress.NONE);
-            String expected = checksums.parseSha256Asset(checksum.path(), downloaded.path().getFileName().toString());
-            if (!checksums.matches(downloaded.path(), expected)) throw new IOException("SHA-256 скачанного файла не совпал");
-            journal.write(snapshot.repository().slug(), "Проверка файла", "Успешно", "SHA-256 совпал", null);
+            checksumPath = checksum.path();
         }
-        if (snapshot.selectedAsset().packageType() == PackageType.EXE) {
-            AuthenticodeStatus signature = new AuthenticodeVerifier().verify(downloaded.path());
-            if (signature == AuthenticodeStatus.INVALID) throw new IOException("Цифровая подпись установщика недействительна");
-            journal.write(snapshot.repository().slug(), "Проверка файла", "Успешно", "Authenticode: " + signature, null);
-            return signature;
-        }
-        return AuthenticodeStatus.UNAVAILABLE;
+        FileVerificationResult result = new FileVerificationService().verify(downloaded.path(), snapshot.manifest() == null ? snapshot.selectedAsset().packageType() : snapshot.manifest().installer().type(), checksumPath);
+        String outcome = result.permitsInstallation() ? (result.hasWarning() ? "Предупреждение" : "Успешно") : "Ошибка";
+        journal.write(snapshot.repository().slug(), "Проверка файла", outcome, result.summary(), null);
+        if (!result.permitsInstallation()) throw new IOException("Цифровая подпись установщика недействительна");
+        return result;
     }
     private ProcessClosePreparation closeRunningProcesses(ApplicationSnapshot snapshot, OperationRequest request) throws IOException {
         Path executable = verifiedInstalledExecutable(snapshot).orElse(null);
@@ -727,6 +718,6 @@ public final class AppFleetService implements AutoCloseable {
         private static ProcessClosePreparation empty() { return new ProcessClosePreparation(List.of(), List.of()); }
     }
     private record PendingInstallation(ForceCloseContinuation continuation, InstallationPlan plan, DownloadedFile installer,
-                                       AuthenticodeStatus signature, OperationDirectory operationDirectory, List<RunningApplication> gracefullyClosed,
+                                       FileVerificationResult verification, OperationDirectory operationDirectory, List<RunningApplication> gracefullyClosed,
                                        List<RunningApplication> forceCloseProcesses, OperationCoordinator.Lease lease) { }
 }
