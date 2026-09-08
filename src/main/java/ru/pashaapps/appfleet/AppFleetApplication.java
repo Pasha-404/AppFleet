@@ -40,7 +40,8 @@ public final class AppFleetApplication extends Application {
         System.setProperty("LOG_DIR", paths.logDirectory().toString());
         OperationCoordinator operations = new OperationCoordinator();
         AppFleetService service = new AppFleetService(paths, AppFleetObjectMapper.create(), build.version(), operations);
-        window = new MainWindow(stage, service, new SelfUpdateService(build, paths, AppFleetObjectMapper.create(), operations), build);
+        window = new MainWindow(stage, service, new SelfUpdateService(build, paths, AppFleetObjectMapper.create(), operations), build,
+                Boolean.getBoolean("appfleet.developmentRun"));
         stage.setOnCloseRequest(event -> window.close());
         window.show();
     }

@@ -10,7 +10,7 @@ import java.util.Properties
 import java.util.zip.ZipFile
 
 group = 'ru.pashaapps'
-version = providers.gradleProperty('version').orElse('1.0.0').get()
+version = providers.gradleProperty('version').orElse('0.0.0-dev').get()
 def appfleetRepositoryUrl = providers.gradleProperty('appfleetRepositoryUrl').orElse('https://github.com/Pasha-404/AppFleet')
 def appfleetAppId = providers.gradleProperty('appfleetAppId').orElse('5dce5095-1140-4ceb-8a85-99e029c73468')
 
@@ -134,6 +134,7 @@ tasks.register('verifyBuildInfo') {
 }
 
 tasks.named('run', JavaExec) {
+    systemProperty 'appfleet.developmentRun', 'true'
     doFirst {
         def javafxJars = configurations.runtimeClasspath.files.findAll { it.name.startsWith('javafx-') }
         jvmArgs '--module-path', javafxJars.collect { it.absolutePath }.join(File.pathSeparator), '--add-modules', 'javafx.controls,javafx.graphics,javafx.base'

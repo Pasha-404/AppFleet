@@ -20,5 +20,5 @@
     "executableValue": "Executable"
   },
   "processNames": ["MyProduct.exe"],
-  "minimumAppFleetVersion": "1.0.0"
+  "minimumAppFleetVersion": "2.0.0"
 }

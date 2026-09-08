@@ -6,7 +6,7 @@ AppFleet — Windows-приложение на Java 21 и JavaFX для уста
 
 Скачайте `AppFleet-Setup-<version>-x64.exe` на странице [Releases](https://github.com/Pasha-404/AppFleet/releases), при необходимости сверьте его с опубликованным файлом `.sha256` и запустите установщик. Java отдельно не нужна: Runtime встроена в приложение.
 
-Первый выпуск пока не подписан Authenticode, поэтому Windows может показать предупреждение о неподписанном EXE. AppFleet проверяет SHA-256 установщика перед самообновлением.
+Пока установщик не подписан Authenticode, Windows может показать предупреждение о неподписанном EXE. AppFleet проверяет SHA-256 установщика перед самообновлением; отсутствие подписи показывается как предупреждение, а недействительная подпись блокирует запуск.
 
 ## Возможности
 
@@ -33,6 +33,8 @@ Gradle Wrapper включён в репозиторий. JavaFX JMODs для `jl
 .\gradlew.bat run
 ```
 
+`gradlew run` запускает development-режим: версия берётся из `gradle.properties`, а самообновление AppFleet отключено. Такой запуск не должен заменять установленное приложение.
+
 Live-проверка использует реальный публичный релиз [SortIt v1.5.0](https://github.com/Pasha-404/sortit/releases/tag/v1.5.0), но запускается отдельно, чтобы обычные тесты не зависели от сети:
 
 ```powershell
@@ -42,13 +44,13 @@ Live-проверка использует реальный публичный �
 ## Сборка Windows-релиза
 
 ```powershell
-.\scripts\build-release.ps1 -Version 1.0.0 -RepositoryUrl "https://github.com/Pasha-404/AppFleet"
+.\scripts\build-release.ps1 -Version 2.0.0 -RepositoryUrl "https://github.com/Pasha-404/AppFleet"
 ```
 
 Либо непосредственно через Gradle:
 
 ```powershell
-.\gradlew.bat clean test buildWindowsInstaller '-Pversion=1.0.0' '-PappfleetRepositoryUrl=https://github.com/Pasha-404/AppFleet'
+.\gradlew.bat clean test buildWindowsInstaller '-Pversion=2.0.0' '-PappfleetRepositoryUrl=https://github.com/Pasha-404/AppFleet'
 ```
 
 Результат находится в `dist/release/<version>`:
@@ -60,14 +62,14 @@ Live-проверка использует реальный публичный �
 Версия определяется одним Gradle property и переносится в JAR, app-image, Inno Setup, Registry и manifest. При наличии сертификата подпись добавляется до вычисления SHA-256:
 
 ```powershell
-.\gradlew.bat buildWindowsInstaller '-Pversion=1.0.0' '-PappfleetRepositoryUrl=https://github.com/Pasha-404/AppFleet' '-PsignCertificateThumbprint=<thumbprint>'
+.\gradlew.bat buildWindowsInstaller '-Pversion=2.0.0' '-PappfleetRepositoryUrl=https://github.com/Pasha-404/AppFleet' '-PsignCertificateThumbprint=<thumbprint>'
 ```
 
 Используется `signtool` из PATH и timestamp URL `http://timestamp.digicert.com`, который можно заменить `-PtimestampUrl=...`.
 
 ## Публикация приложения, совместимого с AppFleet
 
-AppFleet проверяет только stable GitHub Releases публичного репозитория. Для каждого выпуска публикуйте tag формата `v<SemVer>` и три asset в одном Release:
+AppFleet проверяет только stable GitHub Releases публичного репозитория. Для каждого выпуска публикуйте tag формата `v<SemVer>` и ровно три asset в одном Release:
 
 | Asset | Назначение |
 | --- | --- |
@@ -75,7 +77,7 @@ AppFleet проверяет только stable GitHub Releases публично
 | `<TechnicalName>-Setup-<version>-x64.exe.sha256` | SHA-256 окончательного EXE: 64 символа в нижнем регистре, два пробела, имя EXE. |
 | `appfleet-manifest.json` | Валидный manifest схемы 1. |
 
-Не публикуйте стабильный выпуск как Draft или Prerelease. Подписывайте EXE Authenticode до вычисления SHA-256, если сертификат доступен. Не заменяйте уже опубликованные assets другой версией файлов.
+Не добавляйте к стандартизированному Release другие EXE или архивы. Не публикуйте стабильный выпуск как Draft или Prerelease. Подписывайте EXE Authenticode до вычисления SHA-256, если сертификат доступен. Не заменяйте уже опубликованные assets другой версией файлов.
 
 Главный EXE совместимого приложения обязан содержать встроенные ресурсы `RT_GROUP_ICON` и `RT_ICON`: ICO включает размеры `16`, `32`, `48`, `64`, `128` и `256` px, причём `256×256` — исходное качественное изображение, а не увеличенная малая копия. AppFleet открывает EXE только как ресурсный модуль и выбирает этот ресурс для карточки. Перед выпуском проверяйте именно готовый EXE и не масштабируйте маленький слой ICO до `256×256`.
 
@@ -104,11 +106,11 @@ AppFleet проверяет только stable GitHub Releases публично
     "executableValue": "Executable"
   },
   "processNames": ["MyProduct.exe"],
-  "minimumAppFleetVersion": "1.0.0"
+  "minimumAppFleetVersion": "2.0.0"
 }
 ```
 
-`appId` — постоянный UUID приложения: не меняйте его между релизами. `technicalName`, версия manifest, имена installer и SHA-256 asset должны точно совпадать с текущим Release. Для Inno Setup обязательны `installer.type: "inno"`, SHA-256 asset и разрешённые silent-аргументы из примера. Необязательное `desktopShortcutTask` содержит имя task из `[Tasks]` Inno Setup, например `desktopicon`: когда пользователь включил настройку AppFleet, она передаётся только при первой установке. При обновлении AppFleet не меняет выбор ярлыков. Для этой возможности сам Inno-скрипт должен содержать `[Tasks] Name: "desktopicon"` и ярлык в `[Icons]` с `Tasks: desktopicon`. Без поля AppFleet не угадывает task и предупредит, что ярлык не создан. Установщик должен записывать `HKCU\\Software\\PashaApps\\<AppId>` со значениями `Version` и `Executable`. AppFleet отвергает manifest с несовпадающими данными и вместо него потребует безопасный ручной выбор файла.
+`appId` — постоянный UUID приложения: не меняйте его между релизами. `technicalName`, версия manifest, имена installer и SHA-256 asset должны точно совпадать с текущим Release. Для Inno Setup обязательны `installer.type: "inno"`, SHA-256 asset и разрешённые silent-аргументы из примера. Необязательное `desktopShortcutTask` содержит имя task из `[Tasks]` Inno Setup, например `desktopicon`: когда пользователь включил настройку AppFleet, она передаётся только при первой установке. При обновлении AppFleet не меняет выбор ярлыков. Для этой возможности сам Inno-скрипт должен содержать `[Tasks] Name: "desktopicon"` и ярлык в `[Icons]` с `Tasks: desktopicon`. Без поля AppFleet не угадывает task и предупредит, что ярлык не создан. Установщик должен записывать `HKCU\\Software\\PashaApps\\<AppId>` со значениями `Version` и `Executable`. AppFleet отвергает manifest с несовпадающими данными и вместо него потребует безопасный ручной выбор файла. Для нового стандартизированного приложения устанавливайте `minimumAppFleetVersion` в `2.0.0`.
 
 ## Иконка
 

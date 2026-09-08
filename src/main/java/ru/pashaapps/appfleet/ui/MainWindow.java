@@ -38,6 +38,7 @@ public final class MainWindow {
     private final AppFleetService service;
     private final SelfUpdateService selfUpdate;
     private final BuildInfo build;
+    private final boolean developmentRun;
     private final ExecutorService startupWorker = Executors.newSingleThreadExecutor(Thread.ofVirtual().name("appfleet-startup-", 0).factory());
     private final ObservableList<ApplicationSnapshot> applications = FXCollections.observableArrayList();
     private final FlowPane applicationCards = new FlowPane(16, 16);
@@ -52,11 +53,12 @@ public final class MainWindow {
     private final ToggleGroup navigation = new ToggleGroup();
     private Button checkUpdatesButton;
 
-    public MainWindow(Stage stage, AppFleetService service, SelfUpdateService selfUpdate, BuildInfo build) {
+    public MainWindow(Stage stage, AppFleetService service, SelfUpdateService selfUpdate, BuildInfo build, boolean developmentRun) {
         this.stage = stage;
         this.service = service;
         this.selfUpdate = selfUpdate;
         this.build = build;
+        this.developmentRun = developmentRun;
         this.applicationsPage = applicationsPage();
         this.journalPage = journalPage();
         this.settingsPage = settingsPage();
@@ -261,8 +263,13 @@ public final class MainWindow {
         return option;
     }
     private void startInitialSequence() {
-        selfUpdate.recoverAfterLaunch();
         service.record("AppFleet", "Запуск", "Успешно", "Запущена версия " + build.version(), null);
+        if (developmentRun) {
+            service.record("AppFleet", "Самообновление", "Пропущено", "Локальный запуск из исходников: самообновление отключено", null);
+            refreshApplications();
+            return;
+        }
+        selfUpdate.recoverAfterLaunch();
         selfUpdate.checkAsync(startupWorker).whenComplete((offer, failure) -> Platform.runLater(() -> {
             if (failure != null) { service.record("AppFleet", "Проверка обновления AppFleet", "Ошибка", "Не удалось проверить обновление AppFleet", unwrap(failure)); refreshApplications(); return; }
             if (offer.isEmpty()) { service.record("AppFleet", "Проверка обновления AppFleet", "Успешно", "AppFleet актуален", null); refreshApplications(); return; }
@@ -316,6 +323,10 @@ public final class MainWindow {
             return;
         }
         if (isAppFleetRepository(snapshot)) {
+            if (developmentRun) {
+                showInfo("Самообновление отключено", "Локальный запуск из исходников не может заменять установленный AppFleet.");
+                return;
+            }
             checkSelfUpdateFromCard();
             return;
         }
