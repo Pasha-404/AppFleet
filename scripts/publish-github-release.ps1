@@ -87,14 +87,16 @@ $payload = [ordered]@{
     generate_release_notes = $false
 } | ConvertTo-Json -Compress
 
-$releases = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases?per_page=100" -Headers $headers)
+$releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases?per_page=100" -Headers $headers
 $published = @($releases | Where-Object { $_.tag_name -eq $Tag -and -not $_.draft })
 if ($published.Count -gt 0) { throw "Release $Tag already exists and is published." }
-$release = @($releases | Where-Object { $_.tag_name -eq $Tag -and $_.draft } | Sort-Object created_at -Descending | Select-Object -First 1)
-if ($release.Count -eq 0) {
+$draftCandidates = @($releases | Where-Object { $_.tag_name -eq $Tag -and $_.draft } | Sort-Object created_at -Descending | Select-Object -First 1)
+if ($draftCandidates.Count -eq 0) {
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases" -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $payload
 } else {
-    $release = $release[0]
+    # @(... Select-Object -First 1) remains an Object[] in PowerShell. Keep
+    # the selected release scalar: its .id must be an Int64 for the API helpers.
+    $release = $draftCandidates[0]
 }
 
 function Assert-RemoteAssetMatches([object]$asset) {
@@ -112,12 +114,15 @@ function Assert-RemoteAssetMatches([object]$asset) {
 
 function Get-RemoteReleaseWithAssets([int64]$releaseId) {
     $draft = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/$releaseId" -Headers $headers
-    $draft.assets = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/$releaseId/assets?per_page=100" -Headers $headers)
+    $remoteAssets = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/$releaseId/assets?per_page=100" -Headers $headers
+    # In PowerShell, wrapping a cmdlet invocation in @() can preserve a JSON
+    # array as one nested Object[]. Flatten it so every asset remains an object.
+    $draft.assets = @($remoteAssets | Write-Output)
     return $draft
 }
 
 function Assert-RemoteReleaseSet([object]$draft, [bool]$requireComplete) {
-    $remoteAssets = @($draft.assets)
+    $remoteAssets = @($draft.assets | Write-Output)
     $unexpected = @($remoteAssets | Where-Object { -not $localAssets.ContainsKey($_.name) })
     if ($unexpected.Count -gt 0) { throw "Draft release contains unexpected assets: $($unexpected.name -join ', '). Do not publish or overwrite this draft automatically." }
     $seen = @{}
