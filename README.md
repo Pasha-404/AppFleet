@@ -77,9 +77,9 @@ AppFleet проверяет только stable GitHub Releases публично
 
 Не публикуйте стабильный выпуск как Draft или Prerelease. Подписывайте EXE Authenticode до вычисления SHA-256, если сертификат доступен. Не заменяйте уже опубликованные assets другой версией файлов.
 
-Главный EXE совместимого приложения обязан содержать встроенные ресурсы `RT_GROUP_ICON` и `RT_ICON`: ICO включает размеры `16`, `32`, `48`, `64`, `128` и `256` px, причём `256×256` — исходное качественное изображение, а не увеличенная малая копия. AppFleet открывает EXE только как ресурсный модуль и выбирает этот ресурс для карточки. Перед выпуском проверяйте именно готовый EXE; требования к ICO, `jpackage` и проверке описаны в [Windows_Installer_Standard.md](Windows_Installer_Standard.md).
+Главный EXE совместимого приложения обязан содержать встроенные ресурсы `RT_GROUP_ICON` и `RT_ICON`: ICO включает размеры `16`, `32`, `48`, `64`, `128` и `256` px, причём `256×256` — исходное качественное изображение, а не увеличенная малая копия. AppFleet открывает EXE только как ресурсный модуль и выбирает этот ресурс для карточки. Перед выпуском проверяйте именно готовый EXE и не масштабируйте маленький слой ICO до `256×256`.
 
-Используйте [шаблон manifest schema 1](examples/appfleet-manifest.json) и замените примерные идентификаторы своими данными. Для готового приложения, которому нужно добавить управляемый AppFleet ярлык рабочего стола, передайте владельцу проекта отдельную [инструкцию миграции](Desktop_Shortcut_Migration.md): она задаёт единые изменения Inno Setup, manifest и обязательные проверки.
+Используйте [шаблон manifest schema 1](examples/appfleet-manifest.json) и замените примерные идентификаторы своими данными. Для управляемого ярлыка рабочего стола готовое приложение должно объявить в manifest поле `desktopShortcutTask` со значением `desktopicon`; Inno Setup создаёт ярлык только при выборе этой задачи на первой установке и сохраняет прежний выбор при обновлении.
 
 ```json
 {
@@ -135,6 +135,6 @@ Inno Setup устанавливает приложение для текущег
 
 GitHub Actions собирает те же assets, что и локальная команда. Push тега `v<SemVer>` запускает сборку Windows, публикует артефакты и создаёт GitHub Release с установщиком, SHA-256 и manifest. Ручной запуск workflow создаёт только build artifacts.
 
-Архитектура и план находятся в [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md), ход работы — в [PROGRESS.md](PROGRESS.md), история выпуска — в [CHANGELOG.md](CHANGELOG.md). Шаблон установщика — [installer/AppFleet.iss](installer/AppFleet.iss), workflow — [.github/workflows/build-release.yml](.github/workflows/build-release.yml).
+История выпусков находится в [CHANGELOG.md](CHANGELOG.md). Шаблон установщика — [installer/AppFleet.iss](installer/AppFleet.iss), workflow — [.github/workflows/build-release.yml](.github/workflows/build-release.yml).
 
 Inno Setup 6 не имеет директивы `UninstallDisplayVersion`, хотя она упомянута в исходном стандарте. Вместо неё используется поддерживаемая `AppVersion`; компилятор Inno Setup создаёт корректную DisplayVersion в Uninstall Registry.
