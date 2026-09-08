@@ -359,6 +359,7 @@ public final class AppFleetService implements AutoCloseable {
                 journal.write(id.slug(), "Запуск установщика", "Завершён", "Установщик завершил основной процесс с кодом " + exit.code(), null);
                 if (!exit.successful()) throw new IOException(exit.message());
                 if (snapshot.manifest() != null && snapshot.manifest().detection() != null) {
+                    operationProgress.phaseChanged(OperationPhase.CONFIRMING_INSTALLATION);
                     detectedInstallation = Optional.of(new StandardInstallationAwaiter(registry).await(snapshot.manifest().appId(), snapshot.release().tagName(), Duration.ofSeconds(60)));
                 }
             }

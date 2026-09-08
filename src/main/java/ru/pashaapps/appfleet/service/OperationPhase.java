@@ -7,6 +7,7 @@ public enum OperationPhase {
     VERIFYING("Проверка файла…", false),
     LAUNCHING_INSTALLER("Запуск установщика…", false),
     WAITING_FOR_INSTALLER("Ожидание завершения установщика…", false),
+    CONFIRMING_INSTALLATION("Подтверждение установки…", false),
     FINISHED("Завершение…", false);
 
     private final String display;

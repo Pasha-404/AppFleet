@@ -49,6 +49,8 @@ public final class MainWindow {
     private final Node applicationsPage;
     private final Node journalPage;
     private final Node settingsPage;
+    private final ToggleGroup navigation = new ToggleGroup();
+    private Button checkUpdatesButton;
 
     public MainWindow(Stage stage, AppFleetService service, SelfUpdateService selfUpdate, BuildInfo build) {
         this.stage = stage;
@@ -81,10 +83,12 @@ public final class MainWindow {
         return bar;
     }
     private Node sidebar() {
-        Button apps = navigationButton("Приложения", () -> content.getChildren().setAll(applicationsPage));
-        Button journal = navigationButton("Журнал", () -> { refreshJournal(); content.getChildren().setAll(journalPage); });
-        Button settings = navigationButton("Настройки", () -> content.getChildren().setAll(settingsPage));
-        Button check = sidebarActionButton("Проверить", this::refreshApplications);
+        ToggleButton apps = navigationButton("Приложения", () -> content.getChildren().setAll(applicationsPage));
+        ToggleButton journal = navigationButton("Журнал", () -> { refreshJournal(); content.getChildren().setAll(journalPage); });
+        ToggleButton settings = navigationButton("Настройки", () -> content.getChildren().setAll(settingsPage));
+        apps.setSelected(true);
+        Button check = sidebarActionButton("Проверить обновления", this::refreshApplications);
+        checkUpdatesButton = check;
         Button add = sidebarActionButton("Добавить репозиторий", this::addRepository); add.getStyleClass().add("primary");
         statusLine.setWrapText(true);
         statusLine.getStyleClass().add("muted");
@@ -94,7 +98,7 @@ public final class MainWindow {
         box.setPrefWidth(255); box.setMinWidth(220); box.setPadding(new Insets(18, 14, 18, 14)); box.getStyleClass().add("sidebar");
         return box;
     }
-    private Button navigationButton(String text, Runnable action) { Button button = new Button(text); button.setMaxWidth(Double.MAX_VALUE); button.getStyleClass().add("navigation"); button.setOnAction(event -> action.run()); return button; }
+    private ToggleButton navigationButton(String text, Runnable action) { ToggleButton button = new ToggleButton(text); button.setMaxWidth(Double.MAX_VALUE); button.setToggleGroup(navigation); button.getStyleClass().add("navigation"); button.setOnAction(event -> action.run()); return button; }
     private Button sidebarActionButton(String text, Runnable action) { Button button = new Button(text); button.setMaxWidth(Double.MAX_VALUE); button.setOnAction(event -> action.run()); return button; }
     private Node applicationsPage() {
         Label heading = new Label("Приложения"); heading.getStyleClass().add("page-heading");
@@ -124,30 +128,38 @@ public final class MainWindow {
         Label repository = new Label(snapshot.repository().slug()); repository.getStyleClass().add("muted");
         VBox identity = new VBox(2, name, repository); HBox.setHgrow(identity, Priority.ALWAYS);
         CardAction presentation = cardAction(snapshot.status());
-        Button action = new Button(presentation.label()); action.setDisable(!presentation.enabled()); action.setOnAction(event -> actOn(snapshot)); action.getStyleClass().add("primary");
-        MenuButton menu = applicationMenu(snapshot); menu.setTooltip(new Tooltip("Дополнительные действия"));
-        HBox header = new HBox(12, icon, identity); if (presentation.enabled()) header.getChildren().add(action); header.getChildren().add(menu); header.setAlignment(Pos.CENTER_LEFT);
+        MenuButton menu = applicationMenu(snapshot); menu.setTooltip(new Tooltip("Действия с " + snapshot.displayName())); menu.setAccessibleText("Действия с " + snapshot.displayName());
+        HBox header = new HBox(12, icon, identity, menu); header.setAlignment(Pos.CENTER_LEFT);
         Label status = new Label(snapshot.status().display()); status.getStyleClass().addAll("status-chip", statusStyle(snapshot.status()));
         Label versions = new Label(versionSummary(snapshot)); versions.setWrapText(true); versions.getStyleClass().add("card-summary");
+        Label freshness = new Label(freshnessWarning(snapshot)); freshness.setWrapText(true); freshness.getStyleClass().add("card-freshness-warning"); freshness.setVisible(!freshness.getText().isBlank()); freshness.setManaged(!freshness.getText().isBlank());
         Button details = new Button("Подробнее"); details.setOnAction(event -> showApplicationDetails(snapshot)); details.getStyleClass().add("secondary");
-        HBox footer = new HBox(details); footer.setAlignment(Pos.CENTER_LEFT);
-        VBox card = new VBox(14, header, status, versions, footer); card.setMinWidth(280); card.setPrefWidth(360); card.setMaxWidth(420); card.getStyleClass().add("app-card");
+        FlowPane footer = new FlowPane(8, 8); footer.setAlignment(Pos.CENTER_LEFT); footer.getStyleClass().add("app-card-footer");
+        if (presentation.enabled()) {
+            Button action = new Button(presentation.label()); action.setOnAction(event -> performCardAction(snapshot, presentation)); action.getStyleClass().add("primary");
+            footer.getChildren().add(action);
+        }
+        footer.getChildren().add(details);
+        VBox card = new VBox(14, header, status, versions, freshness, footer); card.setMinWidth(320); card.setPrefWidth(360); card.setMaxWidth(420); card.getStyleClass().add("app-card");
         return card;
     }
     private MenuButton applicationMenu(ApplicationSnapshot snapshot) {
-        MenuItem details = new MenuItem("Подробнее"); details.setOnAction(event -> showApplicationDetails(snapshot));
-        MenuItem choose = new MenuItem("Выбрать файл релиза"); choose.setDisable(snapshot.release() == null); choose.setOnAction(event -> chooseAsset(snapshot));
-        MenuItem remove = new MenuItem("Удалить из списка"); remove.setOnAction(event -> removeRepository(snapshot));
-        MenuButton menu = new MenuButton("⋯", null, details, choose, new SeparatorMenuItem(), remove); menu.getStyleClass().add("card-menu");
+        MenuItem remove = new MenuItem("Удалить из списка…"); remove.setOnAction(event -> removeRepository(snapshot));
+        MenuButton menu = new MenuButton("⋯");
+        if (manualAssetChoiceAvailable(snapshot)) {
+            MenuItem choose = new MenuItem("Выбрать файл релиза…"); choose.setOnAction(event -> chooseAsset(snapshot));
+            menu.getItems().addAll(choose, new SeparatorMenuItem());
+        }
+        menu.getItems().add(remove); menu.getStyleClass().add("card-menu");
         return menu;
     }
     static CardAction cardAction(AppStatus status) {
         return switch (status) {
-            case NOT_INSTALLED -> new CardAction("Установить", true);
-            case UPDATE_AVAILABLE -> new CardAction("Обновить", true);
-            case CHECK_ERROR -> new CardAction("Повторить", true);
-            case UP_TO_DATE -> new CardAction("Актуально", false);
-            default -> new CardAction("Недоступно", false);
+            case NOT_INSTALLED -> new CardAction("Установить", true, CardActionKind.INSTALL_OR_UPDATE);
+            case UPDATE_AVAILABLE -> new CardAction("Обновить", true, CardActionKind.INSTALL_OR_UPDATE);
+            case ASSET_SELECTION_REQUIRED -> new CardAction("Выбрать файл…", true, CardActionKind.CHOOSE_ASSET);
+            case CHECK_ERROR -> new CardAction("Повторить проверку", true, CardActionKind.RETRY_CHECK);
+            default -> new CardAction("", false, CardActionKind.NONE);
         };
     }
     private static String statusStyle(AppStatus status) {
@@ -159,9 +171,25 @@ public final class MainWindow {
         };
     }
     private static String versionSummary(ApplicationSnapshot snapshot) {
-        if (snapshot.release() == null) return snapshot.message() == null || snapshot.message().isBlank() ? "Сведения о релизе пока недоступны" : snapshot.message();
+        if (snapshot.release() == null) {
+            if (snapshot.status() == AppStatus.CHECK_ERROR) return "Сведения о последнем релизе недоступны.";
+            return snapshot.message() == null || snapshot.message().isBlank() ? "Сведения о релизе пока недоступны" : snapshot.message();
+        }
         String installed = emptyToDash(snapshot.installedVersion());
         return "Установлена: " + installed + "\nПоследняя: " + snapshot.latestVersion();
+    }
+    static String freshnessWarning(ApplicationSnapshot snapshot) {
+        return freshnessWarning(snapshot.status(), snapshot.message());
+    }
+    static String freshnessWarning(AppStatus status, String message) {
+        if (status == AppStatus.CHECK_ERROR) return "Не удалось проверить обновления. Повторите проверку.";
+        if (message != null && message.contains("Показаны последние подтверждённые данные")) {
+            return "Не удалось проверить обновления. Показаны сохранённые данные.";
+        }
+        return "";
+    }
+    static boolean manualAssetChoiceAvailable(ApplicationSnapshot snapshot) {
+        return snapshot.manifest() == null && snapshot.release() != null && !assetCandidates(snapshot).isEmpty();
     }
     private void showApplicationDetails(ApplicationSnapshot snapshot) {
         String releaseDate = snapshot.release() == null ? "—" : DATE_TIME.format(snapshot.release().publishedAt());
@@ -180,7 +208,16 @@ public final class MainWindow {
         TextArea details = new TextArea(text); details.setEditable(false); details.setWrapText(true); details.setPrefColumnCount(64); details.setPrefRowCount(14);
         Dialog<Void> dialog = new Dialog<>(); dialog.initOwner(stage); dialog.setTitle(snapshot.displayName()); dialog.setHeaderText("Сведения о приложении"); dialog.getDialogPane().setContent(details); dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE); dialog.showAndWait();
     }
-    record CardAction(String label, boolean enabled) { }
+    private void performCardAction(ApplicationSnapshot snapshot, CardAction action) {
+        switch (action.kind()) {
+            case RETRY_CHECK -> refreshApplications();
+            case CHOOSE_ASSET -> chooseAsset(snapshot);
+            case INSTALL_OR_UPDATE -> actOn(snapshot);
+            case NONE -> { }
+        }
+    }
+    enum CardActionKind { INSTALL_OR_UPDATE, CHOOSE_ASSET, RETRY_CHECK, NONE }
+    record CardAction(String label, boolean enabled, CardActionKind kind) { }
     private Node journalPage() {
         Label heading = new Label("Журнал"); heading.getStyleClass().add("page-heading");
         Button refresh = new Button("Обновить"); refresh.setOnAction(event -> refreshJournal());
@@ -194,16 +231,34 @@ public final class MainWindow {
     private TableColumn<OperationEntry, String> journalColumn(String title, double width, Function<OperationEntry, String> mapper) { TableColumn<OperationEntry, String> column = new TableColumn<>(title); column.setPrefWidth(width); column.setCellValueFactory(data -> new ReadOnlyStringWrapper(mapper.apply(data.getValue()))); return column; }
     private Node settingsPage() {
         Label heading = new Label("Настройки"); heading.getStyleClass().add("page-heading");
-        Label description = new Label("Настройки применяются к следующим операциям установки и обновления."); description.setWrapText(true); description.getStyleClass().add("muted");
-        CheckBox restart = new CheckBox("Повторно запускать приложение после обновления, если оно было запущено"); restart.setWrapText(true); restart.setSelected(service.settings().restartPreviouslyRunningApp());
-        CheckBox delete = new CheckBox("Удалять скачанные установщики после успешной установки"); delete.setWrapText(true); delete.setSelected(service.settings().deleteInstallerAfterSuccess());
-        CheckBox desktopShortcut = new CheckBox("Создавать ярлык на рабочем столе при первой установке"); desktopShortcut.setWrapText(true); desktopShortcut.setSelected(service.settings().createDesktopShortcutForNewApplications());
-        restart.selectedProperty().addListener((observable, wasSelected, selected) -> saveSettings(new UserSettings(selected, delete.isSelected(), desktopShortcut.isSelected())));
-        delete.selectedProperty().addListener((observable, wasSelected, selected) -> saveSettings(new UserSettings(restart.isSelected(), selected, desktopShortcut.isSelected())));
-        desktopShortcut.selectedProperty().addListener((observable, wasSelected, selected) -> saveSettings(new UserSettings(restart.isSelected(), delete.isSelected(), selected)));
-        VBox options = new VBox(14, restart, delete, desktopShortcut); options.getStyleClass().add("settings-card");
-        VBox page = new VBox(18, heading, description, options); page.getStyleClass().addAll("content-page", "settings-page");
+        Label description = new Label("Настройки применяются к следующим операциям установки и обновления и сохраняются автоматически."); description.setWrapText(true); description.getStyleClass().add("muted");
+        CheckBox restart = new CheckBox("Открывать приложение после обновления"); restart.setSelected(service.settings().restartPreviouslyRunningApp());
+        CheckBox delete = new CheckBox("Удалять скачанные файлы после установки"); delete.setSelected(service.settings().deleteInstallerAfterSuccess());
+        CheckBox desktopShortcut = new CheckBox("Создавать ярлык на рабочем столе"); desktopShortcut.setSelected(service.settings().createDesktopShortcutForNewApplications());
+        AtomicBoolean restoring = new AtomicBoolean();
+        restart.selectedProperty().addListener((observable, wasSelected, selected) -> persistSettings(restart, delete, desktopShortcut, restoring));
+        delete.selectedProperty().addListener((observable, wasSelected, selected) -> persistSettings(restart, delete, desktopShortcut, restoring));
+        desktopShortcut.selectedProperty().addListener((observable, wasSelected, selected) -> persistSettings(restart, delete, desktopShortcut, restoring));
+        VBox applicationOptions = settingsGroup("Приложения",
+                settingOption(restart, "Только если оно работало до обновления. Самообновление AppFleet перезапускает менеджер по собственному протоколу."),
+                settingOption(desktopShortcut, "Только при первой установке, если установщик поддерживает эту возможность. При обновлении прежний выбор сохраняется."));
+        VBox downloadOptions = settingsGroup("Скачанные файлы",
+                settingOption(delete, "После успешной установки или обновления. Файлы неудачной операции могут остаться для диагностики."));
+        VBox body = new VBox(18, heading, description, applicationOptions, downloadOptions); body.setPadding(new Insets(28)); body.getStyleClass().add("settings-body");
+        ScrollPane scroll = new ScrollPane(body); scroll.setFitToWidth(true); scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER); scroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED); scroll.getStyleClass().add("settings-scroll");
+        VBox page = new VBox(scroll); VBox.setVgrow(scroll, Priority.ALWAYS); page.getStyleClass().addAll("content-page", "settings-page");
         return page;
+    }
+    private static VBox settingsGroup(String title, Node... options) {
+        Label heading = new Label(title); heading.getStyleClass().add("settings-group-heading");
+        VBox group = new VBox(12); group.getChildren().add(heading); group.getChildren().addAll(options); group.getStyleClass().add("settings-card");
+        return group;
+    }
+    private static VBox settingOption(CheckBox control, String helperText) {
+        control.setWrapText(true);
+        Label helper = new Label(helperText); helper.setWrapText(true); helper.getStyleClass().add("muted");
+        VBox option = new VBox(3, control, helper); option.getStyleClass().add("settings-option");
+        return option;
     }
     private void startInitialSequence() {
         selfUpdate.recoverAfterLaunch();
@@ -216,14 +271,32 @@ public final class MainWindow {
         }));
     }
     private void confirmSelfUpdate(SelfUpdateOffer offer) {
-        Alert dialog = new Alert(Alert.AlertType.CONFIRMATION); dialog.initOwner(stage); dialog.setTitle("Обновление AppFleet"); dialog.setHeaderText("Доступна версия " + offer.manifest().version()); dialog.setContentText("Файл: " + offer.installer().name() + " (" + humanSize(offer.installer().size()) + ")\nSHA-256: будет проверен\nЦифровая подпись: будет проверена; отсутствие подписи не блокирует обновление.\n\n" + offer.release().body() + "\n\nИсточник: " + offer.release().htmlUrl());
-        if (dialog.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) { service.record("AppFleet", "Самообновление", "Отменено", "Пользователь отказался от обновления", null); refreshApplications(); return; }
+        if (!showSelfUpdateConfirmation(offer)) { service.record("AppFleet", "Самообновление", "Отменено", "Пользователь отказался от обновления", null); refreshApplications(); return; }
         AtomicBoolean cancelled = new AtomicBoolean(); Stage progress = progressStage("Скачивание обновления AppFleet", cancelled);
-        java.util.concurrent.CompletableFuture.supplyAsync(() -> { try { return selfUpdate.install(offer, cancelled::get, updateProgress(progress), operationProgress(progress)); } catch (Exception error) { throw new java.util.concurrent.CompletionException(error); } }, startupWorker).whenComplete((started, failure) -> Platform.runLater(() -> { progress.close(); if (failure != null) { service.record("AppFleet", "Самообновление", "Ошибка", "Не удалось запустить обновление", unwrap(failure)); showError("Обновление AppFleet не запущено", unwrap(failure).getMessage()); refreshApplications(); } else { String message = "Внешний установщик запущен; AppFleet будет перезапущен.\n\nПроверка файла: " + started.verification().summary(); service.record("AppFleet", "Самообновление", started.verification().hasWarning() ? "Предупреждение" : "Запущено", message, null); if (started.verification().hasWarning()) showInfo("Самообновление запущено", message); Platform.exit(); } }));
+        java.util.concurrent.CompletableFuture.supplyAsync(() -> { try { return selfUpdate.install(offer, cancelled::get, updateProgress(progress), operationProgress(progress)); } catch (Exception error) { throw new java.util.concurrent.CompletionException(error); } }, startupWorker).whenComplete((started, failure) -> Platform.runLater(() -> { closeProgress(progress); if (failure != null) { service.record("AppFleet", "Самообновление", "Ошибка", "Не удалось запустить обновление", unwrap(failure)); showError("Обновление AppFleet не запущено", unwrap(failure).getMessage()); refreshApplications(); } else { String message = "Внешний установщик запущен; AppFleet будет перезапущен.\n\nПроверка файла: " + started.verification().summary(); service.record("AppFleet", "Самообновление", started.verification().hasWarning() ? "Предупреждение" : "Запущено", message, null); if (started.verification().hasWarning()) showInfo("Самообновление запущено", message); Platform.exit(); } }));
+    }
+    private boolean showSelfUpdateConfirmation(SelfUpdateOffer offer) {
+        Dialog<ButtonType> dialog = new Dialog<>(); dialog.initOwner(stage); dialog.setTitle("Обновление AppFleet"); dialog.setHeaderText("Доступна версия " + offer.manifest().version()); dialog.setResizable(true); dialog.getDialogPane().setPrefWidth(660);
+        Label overview = new Label("Файл: " + offer.installer().name() + " (" + humanSize(offer.installer().size()) + ")\nSHA-256: будет проверен\nЦифровая подпись: будет проверена; отсутствие подписи не блокирует обновление.\nИсточник: " + offer.release().htmlUrl()); overview.setWrapText(true);
+        VBox content = new VBox(10, overview, new Separator(), releaseNotesArea(offer.release().body())); dialog.getDialogPane().setContent(content);
+        ButtonType update = new ButtonType("Обновить", ButtonBar.ButtonData.OK_DONE); dialog.getDialogPane().getButtonTypes().addAll(update, ButtonType.CANCEL); dialog.setResultConverter(button -> button);
+        return dialog.showAndWait().orElse(ButtonType.CANCEL) == update;
     }
     private void refreshApplications() {
-        statusLine.setText("Проверка репозиториев…");
-        service.checkAll().whenComplete((checked, failure) -> Platform.runLater(() -> { if (failure != null) { statusLine.setText("Ошибка проверки"); showError("Не удалось проверить репозитории", unwrap(failure).getMessage()); return; } applications.setAll(checked); statusLine.setText("Последняя проверка: " + DATE_TIME.format(java.time.Instant.now()) + " · репозиториев: " + checked.size()); }));
+        if (checkUpdatesButton != null && checkUpdatesButton.isDisable()) return;
+        if (checkUpdatesButton != null) checkUpdatesButton.setDisable(true);
+        setStatusLine("Проверка обновлений…", false);
+        service.checkAll().whenComplete((checked, failure) -> Platform.runLater(() -> {
+            if (checkUpdatesButton != null) checkUpdatesButton.setDisable(false);
+            if (failure != null) { setStatusLine("Ошибка проверки обновлений", true); showError("Не удалось проверить репозитории", unwrap(failure).getMessage()); return; }
+            applications.setAll(checked);
+            long stale = checked.stream().filter(snapshot -> !freshnessWarning(snapshot).isBlank()).count();
+            String timestamp = DATE_TIME.format(java.time.Instant.now());
+            setStatusLine(stale == 0
+                    ? "Последняя проверка: " + timestamp + " · репозиториев: " + checked.size()
+                    : "Последняя попытка проверки: " + timestamp + " · не подтверждено: " + stale,
+                    stale != 0);
+        }));
     }
     private void addRepository() {
         TextInputDialog dialog = new TextInputDialog(); dialog.initOwner(stage); dialog.setTitle("Добавить репозиторий"); dialog.setHeaderText("Публичный GitHub-репозиторий"); dialog.setContentText("Ссылка:");
@@ -231,9 +304,12 @@ public final class MainWindow {
     }
     private void chooseAsset(ApplicationSnapshot snapshot) {
         ListView<ReleaseAsset> list = new ListView<>(FXCollections.observableArrayList(assetCandidates(snapshot))); list.setCellFactory(ignored -> new ListCell<>() { @Override protected void updateItem(ReleaseAsset item, boolean empty) { super.updateItem(item, empty); setText(empty || item == null ? null : item.name() + " · " + item.packageType() + " · " + item.architecture() + " · " + humanSize(item.size())); } });
-        Dialog<ReleaseAsset> dialog = new Dialog<>(); dialog.initOwner(stage); dialog.setTitle("Выберите файл релиза"); dialog.setHeaderText(snapshot.repository().slug()); dialog.getDialogPane().setContent(list); ButtonType choose = new ButtonType("Выбрать", ButtonBar.ButtonData.OK_DONE); dialog.getDialogPane().getButtonTypes().addAll(choose, ButtonType.CANCEL); dialog.setResultConverter(button -> button == choose ? list.getSelectionModel().getSelectedItem() : null); dialog.showAndWait().ifPresent(asset -> service.chooseAsset(snapshot.repository(), asset).whenComplete((updated, failure) -> Platform.runLater(() -> { if (failure != null) showError("Не удалось сохранить выбор", unwrap(failure).getMessage()); else applications.setAll(service.currentSnapshots()); })));
+        if (snapshot.selectedAsset() != null) list.getSelectionModel().select(snapshot.selectedAsset());
+        Dialog<ReleaseAsset> dialog = new Dialog<>(); dialog.initOwner(stage); dialog.setTitle("Выберите файл релиза"); dialog.setHeaderText(snapshot.repository().slug()); dialog.setResizable(true); dialog.getDialogPane().setPrefWidth(620); dialog.getDialogPane().setContent(list); ButtonType choose = new ButtonType("Выбрать", ButtonBar.ButtonData.OK_DONE); dialog.getDialogPane().getButtonTypes().addAll(choose, ButtonType.CANCEL);
+        Node chooseButton = dialog.getDialogPane().lookupButton(choose); chooseButton.disableProperty().bind(list.getSelectionModel().selectedItemProperty().isNull());
+        dialog.setResultConverter(button -> button == choose ? list.getSelectionModel().getSelectedItem() : null); dialog.showAndWait().ifPresent(asset -> service.chooseAsset(snapshot.repository(), asset).whenComplete((updated, failure) -> Platform.runLater(() -> { if (failure != null) showError("Не удалось сохранить выбор", unwrap(failure).getMessage()); else applications.setAll(service.currentSnapshots()); })));
     }
-    private void removeRepository(ApplicationSnapshot snapshot) { Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, "Приложение будет удалено только из списка AppFleet. Установленная программа останется в Windows.", ButtonType.OK, ButtonType.CANCEL); confirm.initOwner(stage); confirm.setHeaderText("Удалить " + snapshot.repository().slug() + " из списка?"); if (confirm.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) service.removeRepository(snapshot.repository()).whenComplete((nothing, failure) -> Platform.runLater(() -> { if (failure != null) showError("Не удалось удалить запись", unwrap(failure).getMessage()); else applications.setAll(service.currentSnapshots()); })); }
+    private void removeRepository(ApplicationSnapshot snapshot) { ButtonType remove = new ButtonType("Удалить из списка", ButtonBar.ButtonData.OK_DONE); Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, "Приложение будет удалено только из списка AppFleet. Установленная программа останется в Windows.", remove, ButtonType.CANCEL); confirm.initOwner(stage); confirm.setHeaderText("Удалить " + snapshot.repository().slug() + " из списка?"); if (confirm.showAndWait().orElse(ButtonType.CANCEL) == remove) service.removeRepository(snapshot.repository()).whenComplete((nothing, failure) -> Platform.runLater(() -> { if (failure != null) showError("Не удалось удалить запись", unwrap(failure).getMessage()); else applications.setAll(service.currentSnapshots()); })); }
     private void actOn(ApplicationSnapshot snapshot) {
         if (snapshot.status() == AppStatus.CHECK_ERROR) {
             refreshApplications();
@@ -283,7 +359,7 @@ public final class MainWindow {
     private void runOperation(InstallationPlan plan) {
         AtomicBoolean cancelled = new AtomicBoolean(); Stage progress = progressStage("Скачивание и установка", cancelled);
         service.installOrUpdate(plan, cancelled::get, updateProgress(progress), operationProgress(progress)).whenComplete((result, failure) -> Platform.runLater(() -> {
-            progress.close();
+            closeProgress(progress);
             if (failure != null) { showError("Операция завершилась ошибкой", unwrap(failure).getMessage()); return; }
             if (result.requiresForceCloseConfirmation()) {
                 Alert force = new Alert(Alert.AlertType.CONFIRMATION, "Приложение не завершилось после штатного запроса закрытия. Разрешить принудительно завершить только ранее обнаруженные процессы и продолжить установку?", ButtonType.OK, ButtonType.CANCEL);
@@ -305,7 +381,7 @@ public final class MainWindow {
         Stage progress = progressStage("Завершение установки", ignoredCancellation);
         showOperationPhase(progress, OperationPhase.LAUNCHING_INSTALLER);
         service.continueAfterForceClose(continuation, true, operationProgress(progress)).whenComplete((result, failure) -> Platform.runLater(() -> {
-            progress.close();
+            closeProgress(progress);
             if (failure != null) {
                 showError("Операция завершилась ошибкой", unwrap(failure).getMessage());
                 return;
@@ -329,21 +405,52 @@ public final class MainWindow {
         String signatureNotice = preview.packageType() != ru.pashaapps.appfleet.domain.PackageType.ZIP
                 ? "\nЦифровая подпись: будет проверена; отсутствие подписи не блокирует установку."
                 : "\nЦифровая подпись: не применяется к ZIP-пакету.";
-        Label details = new Label("Текущая версия: " + emptyToDash(preview.currentVersion()) + "\nУстанавливаемая версия: " + preview.targetVersion() + "\nФайл: " + preview.assetName() + " (" + humanSize(preview.assetSize()) + ")\nИсточник: " + preview.sourceUrl() + "\nSHA-256: " + (preview.sha256Available() ? "будет проверен" : "не опубликован") + signatureNotice + "\n\n" + preview.releaseDescription() + (preview.thirdPartyInteractiveExeWarning() ? "\n\nВнимание: сторонний EXE будет запущен интерактивно." : "")); details.setWrapText(true);
+        Label details = new Label("Текущая версия: " + emptyToDash(preview.currentVersion()) + "\nУстанавливаемая версия: " + preview.targetVersion() + "\nФайл: " + preview.assetName() + " (" + humanSize(preview.assetSize()) + ")\nИсточник: " + preview.sourceUrl() + "\nSHA-256: " + (preview.sha256Available() ? "будет проверен" : "не опубликован") + signatureNotice + (preview.thirdPartyInteractiveExeWarning() ? "\n\nВнимание: сторонний EXE будет запущен интерактивно." : "")); details.setWrapText(true);
         CheckBox close = new CheckBox("Закрыть запущенное приложение автоматически, если оно обнаружено"); close.setWrapText(true);
-        VBox content = new VBox(12, details, new Separator(), close); content.setPrefWidth(600); dialog.getDialogPane().setContent(content); ButtonType execute = new ButtonType(preview.currentVersion() == null ? "Установить" : "Обновить", ButtonBar.ButtonData.OK_DONE); dialog.getDialogPane().getButtonTypes().addAll(execute, ButtonType.CANCEL); dialog.setResultConverter(button -> button == execute ? new OperationRequest(true, close.isSelected(), false) : OperationRequest.cancelled()); return dialog.showAndWait().filter(OperationRequest::confirmed);
+        VBox content = new VBox(12, details, new Separator(), releaseNotesArea(preview.releaseDescription()), new Separator(), close); content.setPrefWidth(620); dialog.setResizable(true); dialog.getDialogPane().setPrefWidth(660); dialog.getDialogPane().setContent(content); ButtonType execute = new ButtonType(preview.currentVersion() == null ? "Установить" : "Обновить", ButtonBar.ButtonData.OK_DONE); dialog.getDialogPane().getButtonTypes().addAll(execute, ButtonType.CANCEL); dialog.setResultConverter(button -> button == execute ? new OperationRequest(true, close.isSelected(), false) : OperationRequest.cancelled()); return dialog.showAndWait().filter(OperationRequest::confirmed);
     }
-    private Stage progressStage(String title, AtomicBoolean cancelled) { Stage popup = new Stage(); popup.initOwner(stage); popup.initModality(Modality.WINDOW_MODAL); popup.setTitle(title); ProgressBar bar = new ProgressBar(ProgressIndicator.INDETERMINATE_PROGRESS); bar.setPrefWidth(330); Label label = new Label("Подготовка…"); Button cancel = new Button("Отмена"); cancel.setOnAction(event -> { cancelled.set(true); cancel.setDisable(true); label.setText("Отмена…"); }); VBox box = new VBox(12, label, bar, cancel); box.setPadding(new Insets(20)); box.setAlignment(Pos.CENTER); popup.setScene(new javafx.scene.Scene(box)); popup.setResizable(false); popup.show(); popup.getProperties().put("bar", bar); popup.getProperties().put("label", label); popup.getProperties().put("cancel", cancel); return popup; }
+    private TextArea releaseNotesArea(String notes) {
+        TextArea area = new TextArea(notes == null || notes.isBlank() ? "Описание релиза не опубликовано." : notes); area.setEditable(false); area.setWrapText(true); area.setPrefRowCount(7); area.setPrefHeight(160); area.setMaxHeight(220); VBox.setVgrow(area, Priority.ALWAYS);
+        return area;
+    }
+    private Stage progressStage(String title, AtomicBoolean cancelled) {
+        Stage popup = new Stage(); popup.initOwner(stage); popup.initModality(Modality.WINDOW_MODAL); popup.setTitle(title);
+        ProgressBar bar = new ProgressBar(ProgressIndicator.INDETERMINATE_PROGRESS); bar.setPrefWidth(330);
+        Label phase = new Label(OperationPhase.PREPARING.display()); phase.getStyleClass().add("operation-phase");
+        Label detail = new Label(); detail.setWrapText(true); detail.getStyleClass().add("muted");
+        Button cancel = new Button("Отмена");
+        VBox box = new VBox(10, phase, detail, bar, cancel); box.setPadding(new Insets(20)); box.setAlignment(Pos.CENTER_LEFT); box.getStyleClass().add("operation-progress");
+        javafx.scene.Scene scene = new javafx.scene.Scene(box); if (stage.getScene() != null) scene.getStylesheets().addAll(stage.getScene().getStylesheets()); popup.setScene(scene); popup.getIcons().setAll(stage.getIcons()); popup.setResizable(false);
+        popup.getProperties().put("bar", bar); popup.getProperties().put("phaseLabel", phase); popup.getProperties().put("detailLabel", detail); popup.getProperties().put("cancel", cancel); popup.getProperties().put("phase", OperationPhase.PREPARING); popup.getProperties().put("allowClose", false);
+        cancel.setOnAction(event -> requestCancellation(popup, cancelled));
+        popup.setOnCloseRequest(event -> { if (Boolean.TRUE.equals(popup.getProperties().get("allowClose"))) return; event.consume(); requestCancellation(popup, cancelled); });
+        popup.show();
+        return popup;
+    }
     private DownloadProgress updateProgress(Stage popup) {
         return new CoalescingDownloadProgress((received, total) -> Platform.runLater(() -> {
+            if (popup.getProperties().get("phase") != OperationPhase.DOWNLOADING) return;
             ProgressBar bar = (ProgressBar) popup.getProperties().get("bar");
-            Label label = (Label) popup.getProperties().get("label");
+            Label label = (Label) popup.getProperties().get("detailLabel");
             bar.setProgress(total <= 0 ? ProgressIndicator.INDETERMINATE_PROGRESS : (double) received / total);
             label.setText(total <= 0 ? humanSize(received) + " скачано" : humanSize(received) + " из " + humanSize(total));
         }));
     }
     private OperationProgress operationProgress(Stage popup) { return phase -> Platform.runLater(() -> showOperationPhase(popup, phase)); }
-    private void showOperationPhase(Stage popup, OperationPhase phase) { Label label = (Label) popup.getProperties().get("label"); Button cancel = (Button) popup.getProperties().get("cancel"); if (phase != OperationPhase.FINISHED) label.setText(phase.display()); cancel.setDisable(!phase.cancellable() || cancel.isDisable()); }
+    private void showOperationPhase(Stage popup, OperationPhase phase) {
+        popup.getProperties().put("phase", phase);
+        Label label = (Label) popup.getProperties().get("phaseLabel"); Label detail = (Label) popup.getProperties().get("detailLabel"); ProgressBar bar = (ProgressBar) popup.getProperties().get("bar"); Button cancel = (Button) popup.getProperties().get("cancel");
+        label.setText(phase.display());
+        if (phase != OperationPhase.DOWNLOADING) { detail.setText(""); bar.setProgress(ProgressIndicator.INDETERMINATE_PROGRESS); }
+        cancel.setDisable(!phase.cancellable() || cancel.isDisable());
+    }
+    private void requestCancellation(Stage popup, AtomicBoolean cancelled) {
+        OperationPhase phase = (OperationPhase) popup.getProperties().get("phase");
+        if (phase == null || !phase.cancellable() || !cancelled.compareAndSet(false, true)) return;
+        ((Button) popup.getProperties().get("cancel")).setDisable(true);
+        ((Label) popup.getProperties().get("detailLabel")).setText("Отмена запрошена…");
+    }
+    private static void closeProgress(Stage popup) { popup.getProperties().put("allowClose", true); popup.close(); }
     private void refreshJournal() { journalTable.setItems(FXCollections.observableArrayList(service.journalEntries())); }
     private void showTechnicalDetails(OperationEntry entry) { Alert detail = new Alert(Alert.AlertType.INFORMATION); detail.initOwner(stage); detail.setTitle("Технические подробности"); detail.setHeaderText(entry.operation() + " — " + entry.result()); TextArea area = new TextArea(entry.technicalDetails().isBlank() ? entry.message() : entry.technicalDetails()); area.setEditable(false); area.setWrapText(false); area.setPrefColumnCount(90); area.setPrefRowCount(20); detail.getDialogPane().setContent(area); detail.showAndWait(); }
     private static List<ReleaseAsset> assetCandidates(ApplicationSnapshot snapshot) {
@@ -351,7 +458,28 @@ public final class MainWindow {
         if (snapshot.release() == null) return List.of();
         return new ru.pashaapps.appfleet.domain.AssetSelector().eligibleAssets(snapshot.release());
     }
-    private void saveSettings(UserSettings settings) { try { service.saveSettings(settings); } catch (Exception failure) { showError("Не удалось сохранить настройки", failure.getMessage()); } }
+    private void persistSettings(CheckBox restart, CheckBox delete, CheckBox desktopShortcut, AtomicBoolean restoring) {
+        if (restoring.get()) return;
+        UserSettings previous = service.settings();
+        try {
+            service.saveSettings(new UserSettings(restart.isSelected(), delete.isSelected(), desktopShortcut.isSelected()));
+        } catch (Exception failure) {
+            restoring.set(true);
+            try {
+                restart.setSelected(previous.restartPreviouslyRunningApp());
+                delete.setSelected(previous.deleteInstallerAfterSuccess());
+                desktopShortcut.setSelected(previous.createDesktopShortcutForNewApplications());
+            } finally {
+                restoring.set(false);
+            }
+            showError("Не удалось сохранить настройки", failure.getMessage());
+        }
+    }
+    private void setStatusLine(String text, boolean warning) {
+        statusLine.setText(text);
+        statusLine.getStyleClass().removeAll("status-warning", "status-error");
+        if (warning) statusLine.getStyleClass().add("status-warning");
+    }
     private void showError(String title, String message) { Alert alert = new Alert(Alert.AlertType.ERROR, message == null ? "Неизвестная ошибка" : message, ButtonType.OK); alert.initOwner(stage); alert.setHeaderText(title); alert.showAndWait(); }
     private void showInfo(String title, String message) { Alert alert = new Alert(Alert.AlertType.INFORMATION, message, ButtonType.OK); alert.initOwner(stage); alert.setHeaderText(title); alert.showAndWait(); }
     private static String emptyToDash(String value) { return value == null || value.isBlank() ? "Не установлено" : value; }

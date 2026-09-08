@@ -4,6 +4,8 @@
 .sidebar { -fx-background-color: #f0f3f7; -fx-border-color: transparent #d6dce5 transparent transparent; }
 .navigation { -fx-background-color: transparent; -fx-alignment: CENTER-LEFT; -fx-padding: 9 10 9 10; }
 .navigation:hover { -fx-background-color: #dbeafe; }
+.navigation:selected { -fx-background-color: #dbeafe; -fx-text-fill: #1d4ed8; -fx-font-weight: bold; }
+.navigation:focused { -fx-border-color: #60a5fa; -fx-border-radius: 6; }
 .button, .menu-button { -fx-background-color: #ffffff; -fx-text-fill: #1f2937; -fx-background-radius: 6; -fx-border-color: #cbd5e1; -fx-border-radius: 6; }
 .button:hover, .menu-button:hover { -fx-background-color: #f1f5f9; }
 .button:disabled { -fx-opacity: 0.62; }
@@ -28,10 +30,17 @@
 .status-neutral { -fx-background-color: #e7edf5; -fx-text-fill: #46566e; }
 .application-icon-placeholder { -fx-background-color: #dbeafe; -fx-background-radius: 10; }
 .application-icon-monogram { -fx-font-size: 18px; -fx-font-weight: bold; -fx-text-fill: #1d4ed8; }
-.card-menu { -fx-font-size: 16px; -fx-font-weight: bold; }
+.card-menu { -fx-font-size: 16px; -fx-font-weight: normal; }
+.card-freshness-warning { -fx-text-fill: #9d2332; }
+.status-warning { -fx-text-fill: #9d2332; }
 .empty-applications { -fx-padding: 28; -fx-text-fill: #64748b; }
-.settings-page { -fx-padding: 28; }
+.settings-page { -fx-padding: 0; }
+.settings-scroll, .settings-scroll > .viewport { -fx-background-color: #f7f8fa; }
+.settings-scroll { -fx-padding: 0; -fx-border-color: transparent; }
+.settings-body { -fx-max-width: 680; }
 .settings-card { -fx-background-color: #ffffff; -fx-border-color: #d8dee8; -fx-background-radius: 10; -fx-border-radius: 10; -fx-padding: 20; -fx-max-width: 620; }
+.settings-group-heading { -fx-font-size: 15px; -fx-font-weight: bold; }
+.settings-option { -fx-padding: 2 0 2 0; }
 .check-box { -fx-padding: 5 0 5 0; }
 .check-box .box { -fx-background-color: #ffffff; -fx-border-color: #94a3b8; }
 .check-box:selected .mark { -fx-background-color: white; }
@@ -39,3 +48,5 @@
 .table-view { -fx-background-color: white; }
 .table-view .column-header { -fx-background-color: #eef2f7; -fx-font-weight: bold; }
 .table-row-cell { -fx-cell-size: 53px; }
+.text-area, .text-area .content { -fx-background-color: #ffffff; -fx-text-fill: #1f2937; }
+.operation-phase { -fx-font-weight: bold; }
